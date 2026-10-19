@@ -51,7 +51,7 @@ mouse, and CS4231 audio. Licensed GPL-2.0-or-later.
 - CPUs at 55 MHz with no external cache (no SuperCache/MXCC).
 - One frame buffer: the TCX, 8-bit only (no 24-bit TCX, cgsix or SX).
 - No floppy drive, no parallel port device, no ISDN (DBRI) audio.
-- Sun's OBP is not included: supply your own SS20 PROM image.
+- Sun's OBP is not included: the default boot rom is openbios, or supply your own SS20 PROM image.
 - The network and CD audio need a current Main_MiSTer (Sun support
   merged 2026-10-06/07).
 
