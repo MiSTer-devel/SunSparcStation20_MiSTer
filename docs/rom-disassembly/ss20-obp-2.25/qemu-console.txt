@@ -1,0 +1,56 @@
+# serial console of the real PROM under qemu-system-sparc 8.2.2 (tools/romdis/qemu_trace.py)
+# NULs and backspace-overwritten progress counters removed
+
+
+Power-ON Reset
+
+           SMCC SPARCstation 10/20 UP/MP POST version VRV3.45 (09/11/95)
+
+CPU_#0       TI, STP1021PGA(1.x)	1Mb External cache
+
+CPU_#1       ******* NOT installed *******
+
+CPU_#2       ******* NOT installed *******
+
+CPU_#3       ******* NOT installed *******
+
+    <<< CPU_00000000 on MBus Slot_00000000 >>> IS RUNNING (MID = 00000008) 
+
+$$$$$   WARNING : No Keyboard Detected! $$$$$
+
+MMU ICACHE_TLB bit pattern Test
+
+    Case 0000000f: I_TLB  mis-matched exp=55555000 obs=00000000 xor= 55555000          entry # 0x00000000
+
+Available Memory 0x08000000
+
+Allocating SRMMU Context Table 
+
+Context Table allocated, Available Memory 0x07fc0000
+
+Setting SRMMU Context Register
+
+Context Table allocated, Available Memory 0x07fc0000
+
+Setting SRMMU Context Table Pointer Register
+
+RAMsize allocated, Available Memory 0x07fb0000
+
+Allocating SRMMU Level 1 Table
+
+Level 1 Table allocated, Available Memory 0x07fafc00
+
+Mapping RAM @ 0xffef0000
+
+RAM mapped, Available Memory 0x07fafa00
+
+Mapping ROM @ 0xffd00000
+
+ROM mapped, Available Memory 0x07faf800
+
+Mapping ROM @ 0x00000000
+
+ROM mapped, Available Memory 0x07faf000
+ttya initialized
+Cpu #0 Data Access Error
+ok qemu-system-sparc: terminating on signal 15 from pid 2393025 (timeout)

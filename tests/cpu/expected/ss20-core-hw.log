@@ -1,0 +1,92 @@
+CPUTEST ss20 psr=40400fc0 nwindows=8 fpu=1
+PASS alu: every integer ALU instruction, table of vectors
+PASS alu: sethi / set / %hi %lo
+PASS alu: wr/rd %y, xor semantics of wr
+PASS ldst: byte/half/word loads, sign extension, big-endian
+PASS ldst: byte/half stores merge into the word
+PASS ldst: ldd/std register pairs
+PASS ldst: ldstub and swap
+PASS ldst: lda/sta with ASI 0xb (supervisor data) and bypass
+PASS ldst: misaligned accesses trap (tt 0x07)
+PASS branch: 16 Bicc conditions x 16 icc values
+PASS branch: 16 Ticc conditions x 16 icc values
+PASS branch: annul bit and delay slots
+PASS branch: call/jmpl link register, computed jumps
+PASS trap: ta n -> tt 0x80+n, trap PC/nPC, register+imm number
+PASS trap: unimp and invalid opcodes -> illegal_instruction
+PASS trap: rett with traps enabled -> illegal_instruction
+PASS trap: rett in user mode -> privileged_instruction (0x03)
+PASS trap: udiv/sdiv by zero -> division_by_zero (0x2a)
+PASS trap: taddcctv/tsubcctv -> tag_overflow (0x0a)
+PASS trap: FPop with PSR.EF=0 -> fp_disabled (0x04)
+PASS trap: coprocessor ops -> cp_disabled (0x24)
+PASS window: save/restore, ins/outs overlap, globals shared
+PASS window: 40-deep recursion, overflow/underflow traps
+PASS window: WIM implements NWINDOWS bits, save into WIM traps
+PASS psr: impl/ver read-only, PIL and icc writable
+PASS psr: TBR.tt holds the last trap type, TBA writable
+PASS fpu: single precision add/sub/mul/div/sqrt, moves
+PASS fpu: double precision arithmetic, even/odd pairs
+PASS fpu: fitos/fitod/fstoi/fdtoi/fstod/fdtos
+PASS fpu: fcmps/fcmpd fcc values and FBfcc
+PASS fpu: FSR cexc/aexc on inexact, divide-by-zero, invalid
+PASS fpu: FLT_MIN*FLT_MIN, DBL_MIN*DBL_MIN: trapped UF|NX (store blocked), untrapped +0
+PASS fpu: libm k_sin shape: faddd in a taken annulling slot, std/ldd moves, nested ret
+PASS chipset: system control reads 0 after power-on (RS, WD clear)
+PASS chipset: NVRAM IDPROM format 1, machine type, checksum
+PASS chipset: NVRAM byte and word stores read back (restored)
+PASS chipset: frame buffer slot starts with FCode (0xf1 header)
+PASS chipset: DMA2 E_BASE_ADDR resets to 0xff
+PASS chipset: 82077 floppy, no drive: reset, VERSION, RECALIBRATE, IRQ
+PASS chipset: TCX stipple and blit doubleword stores
+PASS chipset: SS20 MSI: IOMMU IMPL/VER 0x13, MID 8, arbiter enable
+PASS chipset: SS20 MSI: each CPU reads its own MID; the arbiter parks CPU 1
+PASS chipset: SS20 SIMM slot 7 is 16 MB, aliased every 16 MB
+PASS mmu: SS20 context register has 16 bits, CTPR bits 31:6 stick
+PASS mmu: SS20 contexts 1, 0x101, 0x8001 translate the same VA differently
+PASS mmu: a changed PTE is seen after the matching ASI 3 flush, not before
+PASS mmu: ASI 3 probes page/segment/region/context/entire; 0 on invalid, reserved
+PASS mmu: SFSR L/AT/FT/FAV/OW and SFAR on invalid, reserved, protection, privilege faults; NF
+PASS mmu: an instruction access fault sets the SFSR once (FAV, no OW)
+PASS mmu: an annulled delay slot on an unmapped page takes no trap; the next fetch does (no hang)
+PASS mmu: a store after a load to a page sets M in the PTE and updates the one TLB entry (no duplicate, no endless walk)
+PASS mmu: a window trap in W squashes the walk of the load behind the SAVE before it starts (deep recursion, cold TLB)
+PASS cache: SS20 flash clear (ASI 0x36/0x37) drops stale lines
+    dcache mode: write-through
+PASS cache: SS20 write hits: cached reads see the stores, memory shows the write policy
+PASS cache: SS20 line flush after a DTLB miss reaches the line
+PASS cache: ldstub and swap on a cached line change only their byte / word
+PASS cache: a store then ldstub/swap on the same line keeps the store
+PASS cache: SS20 write-backs of 32 modified lines reach memory intact
+PASS cache: a patched instruction runs after FLUSH
+PASS cache: the words of a line used right after its miss are memory's
+PASS cache: a routine fetched through its line fill runs memory's words
+PASS smp: SS20 CPU 0 sees CPU 1's cached store (SE on)
+SKIP smp: SS20 3 CPUs increment a shared counter under ldstub and swap locks
+PASS smp: SS20 with SE off CPU 0 keeps its stale copy of CPU 1's line (C-4)
+SKIP smp: SS20 3 CPUs pass a token through one cached line, with counters and ldstub
+PASS iu: ba,a / ba / call to .+4: the target that is also the slot
+PASS fpu: misaligned st %f with a pending fp_exception takes tt 7 first
+PASS fpu: back-to-back FP instructions: deferred trap on the next one, dependent chain
+PASS fpu: FQ holds the trapping FPop; STDFQ empties it, is privileged, traps when empty
+PASS trap: LDC/STC family -> cp_disabled (0x24), no memory access
+PASS trap: wr %psr with CWP = NWINDOWS -> illegal_instruction
+PASS iu: reserved ASRs read %y, writes do nothing; CASA -> illegal_instruction
+PASS mmu: SS20 ASI 0x4c is a register, not ASI 0x0c; ASI 0x38 holds 64-bit values
+PASS iu: Y written by MULSCC/UMUL/SMUL is seen by the next instruction (a .umul MULSCC chain, RD %y, UDIV)
+PASS iu: jmp/rett to a jmpl %g1,%o7 (0, 1, 2, 4, 8 stores before the rett), caches on: %o7 is the jmpl's address
+PASS mmu: SS20 ASI 6 TLB image: 64 entries x SEL0-3 hold the POST's bit patterns
+PASS mmu: SS20 ASI 6 TLB image: ASI 3 demaps (context, region, segment, page, entire) clear V by the flush rules
+PASS mmu: an ASI 6 write drops the TLBs (and the L2 TLB): a changed PTE is seen with no ASI 3 flush
+PASS mmu: the L2 TLB enabled at run time serves no entry of an earlier generation
+PASS mmu: an ASI 3 probe returns the PTE in memory after a change with no flush (L2 TLB on)
+PASS cache: SS20 ASI 0x0f/0x0d D and I data images hold every doubleword (4x128x4, 5x64x8)
+PASS cache: SS20 ASI 0x0e/0x0c PTAGs keep V/D/S or V and PA[35:12], STAGs the MRU and lock bits
+PASS cache: SS20 flash clears on the image: lock (VA 0x80000000) drops the locks, valid (VA 0) the PTAG V bits and the MRUs
+PASS cache: SS20 a C=0 page of main memory is cached; the walker's R/M writes reach the cached PTE
+PASS buserr: a bypass load of an empty SBus slot traps tt 0x29; SFSR TO/AT/FT 5/FAV and SFAR, read clears, ldstub, OW, NF; a store is posted
+PASS buserr: through a mapping: load tt 0x29 (AT 1, SFAR), fetch tt 0x21 (FT 5, no FAV), a table in the slot: tt 9 with FT 4, L 3, TO
+SKIP dma: a transfer at a line every two cycles into cached lines, under stores and an I-cache flash clear, is what the module reads
+SKIP dma: a transfer into lines the module keeps reloading meanwhile ends with memory's data in the cache
+SKIP irq: an interrupt never resumes into an annulled delay slot (ba,a / be,a untaken / bn,a under a level-10 source)
+CPUTEST DONE pass=84 fail=0 skip=5

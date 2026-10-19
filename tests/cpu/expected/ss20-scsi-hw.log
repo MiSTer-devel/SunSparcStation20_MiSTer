@@ -1,0 +1,23 @@
+CPUTEST ss20 psr=40400fc0 nwindows=8 fpu=1
+    t1 type 00000000 blocks 00000800 bs 00000200 id 'MiSTer  SCSI Disk       '
+    t3 type 00000000 blocks 00000800 bs 00000200 id 'MiSTer  SCSI Disk       '
+    t6 type 00000005 not ready
+PASS scsi: OpenBIOS's probe of t0-7 (INQUIRY, TUR, READ CAPACITY), mode 0
+PASS scsi: READ(10) at t3: blocks 0-15 one by one, 16-31 by 8, mode 0
+PASS scsi: READ(10) at t3 seen through the D-cache (the buffer cached before each read): blocks 0-31 one by one, 32-47 by 8, mode 0
+PASS scsi: t3 and t1 in turn, 16 reads each, with TUR in between, mode 0
+    t1 type 00000000 blocks 00000800 bs 00000200 id 'MiSTer  SCSI Disk       '
+    t3 type 00000000 blocks 00000800 bs 00000200 id 'MiSTer  SCSI Disk       '
+    t6 type 00000005 not ready
+PASS scsi: OpenBIOS's probe, ICCS not awaited (mode 2), then READ(10) of t3 blocks 0-15
+PASS scsi: WRITE(10) at t3 block 8, read back, restore, mode 1
+    t1 type 00000000 blocks 00000800 bs 00000200 id 'MiSTer  SCSI Disk       '
+    t3 type 00000000 blocks 00000800 bs 00000200 id 'MiSTer  SCSI Disk       '
+    t6 type 00000005 not ready
+PASS scsi: the probe with ICCS and MESSAGE ACCEPTED every time, mode 1
+PASS scsi: READ(10) of the last block of t3, mode 1
+PASS scsi: REQUEST SENSE, 18 of 255 bytes: the last partial word reaches memory, mode 1
+PASS scsi: SDTR as Sun's esp driver sends it, the reply accepted byte by byte, then INQUIRY
+PASS scsi: a SIMPLE QUEUE TAG message after IDENTIFY is taken, then INQUIRY
+SKIP scsi: CD audio at t6: READ TOC, PLAY track 2, SUB-CHANNEL, PAUSE/RESUME, the end
+CPUTEST DONE pass=11 fail=0 skip=1

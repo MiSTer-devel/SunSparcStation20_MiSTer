@@ -1,0 +1,4 @@
+CPUTEST ss20 psr=40400fc0 nwindows=8 fpu=1
+BRK?
+PASS brk: a BREAK on ttya: RR0 bit 7, the ext/status interrupt, a NUL
+CPUTEST DONE pass=1 fail=0 skip=0

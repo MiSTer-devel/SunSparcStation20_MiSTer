@@ -1,0 +1,52 @@
+
+CPUTEST ss20 psr=40400fc0 nwindows=8 fpu=1
+    check 0010a570 exp=ffffffff obs=00000000
+    check 0010a5f0 exp=fffffffe obs=00000000
+    check 0010a670 exp=fffffffd obs=00000000
+    check 0010a6f0 exp=fffffffc obs=00000000
+    check 0010a770 exp=80000001 obs=00000000
+    check 0010a7f0 exp=7fffffff obs=00000000
+    check 0010a800 exp=00000001 obs=ffffffff
+    check 0010a870 exp=7fffffff obs=00000000
+    check 0010a8f0 exp=00000002 obs=00000000
+    check 0010a970 exp=00000001 obs=00000000
+    check 0010a9f0 exp=aaaaaaab obs=00000000
+    check 0010aa70 exp=55555556 obs=00000000
+    check 0010aaf0 exp=ffff0001 obs=00000000
+    check 0010ab70 exp=00010000 obs=00000000
+    check 0010abf0 exp=edcba988 obs=00000000
+    check 0010ac70 exp=01234568 obs=00000000
+FAIL alu: every integer ALU instruction, table of vectors
+PASS alu: sethi / set / %hi %lo
+PASS alu: wr/rd %y, xor semantics of wr
+PASS ldst: byte/half/word loads, sign extension, big-endian
+PASS ldst: byte/half stores merge into the word
+PASS ldst: ldd/std register pairs
+PASS ldst: ldstub and swap
+PASS ldst: lda/sta with ASI 0xb (supervisor data) and bypass
+PASS ldst: misaligned accesses trap (tt 0x07)
+PASS branch: 16 Bicc conditions x 16 icc values
+PASS branch: 16 Ticc conditions x 16 icc values
+PASS branch: annul bit and delay slots
+PASS branch: call/jmpl link register, computed jumps
+PASS trap: ta n -> tt 0x80+n, trap PC/nPC, register+imm number
+PASS trap: unimp and invalid opcodes -> illegal_instruction
+    check 00000002 exp=00002618 obs=0000261c
+FAIL trap: rett with traps enabled -> illegal_instruction
+PASS trap: rett in user mode -> privileged_instruction (0x03)
+PASS trap: udiv/sdiv by zero -> division_by_zero (0x2a)
+PASS trap: taddcctv/tsubcctv -> tag_overflow (0x0a)
+PASS trap: FPop with PSR.EF=0 -> fp_disabled (0x04)
+PASS trap: coprocessor ops -> cp_disabled (0x24)
+PASS window: save/restore, ins/outs overlap, globals shared
+PASS window: 40-deep recursion, overflow/underflow traps
+PASS window: WIM implements NWINDOWS bits, save into WIM traps
+PASS psr: impl/ver read-only, PIL and icc writable
+    check 00000004 exp=00000b30 obs=00000ff0
+FAIL psr: TBR.tt holds the last trap type, TBA writable
+PASS fpu: single precision add/sub/mul/div/sqrt, moves
+PASS fpu: double precision arithmetic, even/odd pairs
+PASS fpu: fitos/fitod/fstoi/fdtoi/fstod/fdtos
+PASS fpu: fcmps/fcmpd fcc values and FBfcc
+PASS fpu: FSR cexc/aexc on inexact, divide-by-zero, invalid
+CPUTEST DONE pass=28 fail=3 skip=0

@@ -1,0 +1,45 @@
+
+CPUTEST ss20 psr=40400fc0 nwindows=8 fpu=1
+PASS alu: every integer ALU instruction, table of vectors
+PASS alu: sethi / set / %hi %lo
+PASS alu: wr/rd %y, xor semantics of wr
+PASS ldst: byte/half/word loads, sign extension, big-endian
+PASS ldst: byte/half stores merge into the word
+PASS ldst: ldd/std register pairs
+PASS ldst: ldstub and swap
+PASS ldst: lda/sta with ASI 0xb (supervisor data) and bypass
+PASS ldst: misaligned accesses trap (tt 0x07)
+PASS branch: 16 Bicc conditions x 16 icc values
+PASS branch: 16 Ticc conditions x 16 icc values
+PASS branch: annul bit and delay slots
+PASS branch: call/jmpl link register, computed jumps
+PASS trap: ta n -> tt 0x80+n, trap PC/nPC, register+imm number
+PASS trap: unimp and invalid opcodes -> illegal_instruction
+    check 00000002 exp=00002768 obs=0000276c
+FAIL trap: rett with traps enabled -> illegal_instruction
+PASS trap: rett in user mode -> privileged_instruction (0x03)
+PASS trap: udiv/sdiv by zero -> division_by_zero (0x2a)
+PASS trap: taddcctv/tsubcctv -> tag_overflow (0x0a)
+PASS trap: FPop with PSR.EF=0 -> fp_disabled (0x04)
+PASS trap: coprocessor ops -> cp_disabled (0x24)
+PASS window: save/restore, ins/outs overlap, globals shared
+PASS window: 40-deep recursion, overflow/underflow traps
+PASS window: WIM implements NWINDOWS bits, save into WIM traps
+PASS psr: impl/ver read-only, PIL and icc writable
+    check 00000004 exp=00000b30 obs=00000ff0
+FAIL psr: TBR.tt holds the last trap type, TBA writable
+PASS fpu: single precision add/sub/mul/div/sqrt, moves
+PASS fpu: double precision arithmetic, even/odd pairs
+PASS fpu: fitos/fitod/fstoi/fdtoi/fstod/fdtos
+PASS fpu: fcmps/fcmpd fcc values and FBfcc
+PASS fpu: FSR cexc/aexc on inexact, divide-by-zero, invalid
+PASS fpu: FLT_MIN*FLT_MIN, DBL_MIN*DBL_MIN: trapped UF|NX (store blocked), untrapped +0
+PASS fpu: misaligned st %f with a pending fp_exception takes tt 7 first
+PASS fpu: FQ holds the trapping FPop; STDFQ empties it, is privileged, traps when empty
+PASS trap: LDC/STC family -> cp_disabled (0x24), no memory access
+PASS trap: wr %psr with CWP = NWINDOWS -> illegal_instruction
+    check 00000004 exp=5a5a1234 obs=00000000
+FAIL iu: reserved ASRs read %y, writes do nothing; CASA -> illegal_instruction
+PASS mmu: SS20 ASI 0x4c is a register, not ASI 0x0c; ASI 0x38 holds 64-bit values
+PASS iu: jmp/rett to a jmpl %g1,%o7 (0, 1, 2, 4, 8 stores before the rett), caches on: %o7 is the jmpl's address
+CPUTEST DONE pass=36 fail=3 skip=0

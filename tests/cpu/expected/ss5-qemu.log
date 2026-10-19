@@ -1,0 +1,85 @@
+
+CPUTEST ss5-qemu psr=04400fc0 nwindows=8 fpu=1
+PASS alu: every integer ALU instruction, table of vectors
+PASS alu: sethi / set / %hi %lo
+PASS alu: wr/rd %y, xor semantics of wr
+PASS ldst: byte/half/word loads, sign extension, big-endian
+PASS ldst: byte/half stores merge into the word
+PASS ldst: ldd/std register pairs
+PASS ldst: ldstub and swap
+PASS ldst: lda/sta with ASI 0xb (supervisor data) and bypass
+PASS ldst: misaligned accesses trap (tt 0x07)
+PASS branch: 16 Bicc conditions x 16 icc values
+PASS branch: 16 Ticc conditions x 16 icc values
+PASS branch: annul bit and delay slots
+PASS branch: call/jmpl link register, computed jumps
+PASS trap: ta n -> tt 0x80+n, trap PC/nPC, register+imm number
+PASS trap: unimp and invalid opcodes -> illegal_instruction
+    check 00000002 exp=70002608 obs=7000260c
+FAIL trap: rett with traps enabled -> illegal_instruction
+PASS trap: rett in user mode -> privileged_instruction (0x03)
+PASS trap: udiv/sdiv by zero -> division_by_zero (0x2a)
+PASS trap: taddcctv/tsubcctv -> tag_overflow (0x0a)
+PASS trap: FPop with PSR.EF=0 -> fp_disabled (0x04)
+PASS trap: coprocessor ops -> cp_disabled (0x24)
+PASS window: save/restore, ins/outs overlap, globals shared
+PASS window: 40-deep recursion, overflow/underflow traps
+PASS window: WIM implements NWINDOWS bits, save into WIM traps
+PASS psr: impl/ver read-only, PIL and icc writable
+    check 00000004 exp=70000b30 obs=70000ff0
+FAIL psr: TBR.tt holds the last trap type, TBA writable
+PASS mmu: context table pointer and context registers
+PASS mmu: Swift TLB replacement control, SFSR/SFAR diag
+PASS cache: MMU identity map, I/D caches on, loops in RAM
+PASS fpu: single precision add/sub/mul/div/sqrt, moves
+PASS fpu: double precision arithmetic, even/odd pairs
+PASS fpu: fitos/fitod/fstoi/fdtoi/fstod/fdtos
+PASS fpu: fcmps/fcmpd fcc values and FBfcc
+PASS fpu: FSR cexc/aexc on inexact, divide-by-zero, invalid
+PASS fpu: FLT_MIN*FLT_MIN, DBL_MIN*DBL_MIN: trapped UF|NX (store blocked), untrapped +0
+PASS chipset: system control reads 0 after power-on (RS, WD clear)
+PASS chipset: NVRAM IDPROM format 1, machine type, checksum
+PASS chipset: NVRAM byte and word stores read back (restored)
+PASS chipset: frame buffer slot starts with FCode (0xf1 header)
+    check 00000001 exp=000000ff obs=00000000
+FAIL chipset: DMA2 E_BASE_ADDR resets to 0xff
+PASS chipset: the PROM answers at pa 0x7000_0000
+    check 00000001 exp=000000c0 obs=00000080
+    check 00000001 exp=000000c1 obs=00000080
+    check 00000001 exp=000000c2 obs=00000080
+    check 00000001 exp=000000c3 obs=00000080
+    check 00000006 exp=00000071 obs=00000021
+FAIL chipset: 82077 floppy, no drive: reset, VERSION, RECALIBRATE, IRQ
+PASS mmu: a changed PTE is seen after the matching ASI 3 flush, not before
+    check 0000000b exp=00000000 obs=000100ee
+FAIL mmu: ASI 3 probes page/segment/region/context/entire; 0 on invalid, reserved
+    check 0000000b exp=000003aa obs=000000aa
+    check 0000000d exp=0000030e obs=0000000e
+FAIL mmu: SFSR L/AT/FT/FAV/OW and SFAR on invalid, reserved, protection, privilege faults; NF
+PASS mmu: an instruction access fault sets the SFSR once (FAV, no OW)
+PASS cache: ldstub and swap on a cached line change only their byte / word
+PASS cache: a store then ldstub/swap on the same line keeps the store
+PASS cache: a patched instruction runs after FLUSH
+PASS cache: the words of a line used right after its miss are memory's
+PASS cache: a routine fetched through its line fill runs memory's words
+PASS fpu: misaligned st %f with a pending fp_exception takes tt 7 first
+PASS fpu: FQ holds the trapping FPop; STDFQ empties it, is privileged, traps when empty
+PASS trap: LDC/STC family -> cp_disabled (0x24), no memory access
+PASS trap: wr %psr with CWP = NWINDOWS -> illegal_instruction
+    check 00000004 exp=5a5a1234 obs=00000000
+FAIL iu: reserved ASRs read %y, writes do nothing; CASA -> illegal_instruction
+PASS iu: jmp/rett to a jmpl %g1,%o7 (0, 1, 2, 4, 8 stores before the rett), caches on: %o7 is the jmpl's address
+SKIP mmu: SS20 ASI 6 TLB image: 64 entries x SEL0-3 hold the POST's bit patterns
+SKIP mmu: SS20 ASI 6 TLB image: ASI 3 demaps (context, region, segment, page, entire) clear V by the flush rules
+    check 00000003 exp=4c200017 obs=4c200016
+FAIL mmu: an ASI 6 write drops the TLBs (and the L2 TLB): a changed PTE is seen with no ASI 3 flush
+    check 00000002 exp=4c200018 obs=4c200016
+FAIL mmu: the L2 TLB enabled at run time serves no entry of an earlier generation
+PASS mmu: an ASI 3 probe returns the PTE in memory after a change with no flush (L2 TLB on)
+SKIP cache: SS20 ASI 0x0f/0x0d D and I data images hold every doubleword (4x128x4, 5x64x8)
+SKIP cache: SS20 ASI 0x0e/0x0c PTAGs keep V/D/S or V and PA[35:12], STAGs the MRU and lock bits
+SKIP cache: SS20 flash clears on the image: lock (VA 0x80000000) drops the locks, valid (VA 0) the PTAG V bits and the MRUs
+SKIP cache: SS20 a C=0 page of main memory is cached; the walker's R/M writes reach the cached PTE
+SKIP buserr: a bypass load of an empty SBus slot traps tt 0x29; SFSR TO/AT/FT 5/FAV and SFAR, read clears, ldstub, OW, NF; a store is posted
+SKIP buserr: through a mapping: load tt 0x29 (AT 1, SFAR), fetch tt 0x21 (FT 5, no FAV), a table in the slot: tt 9 with FT 4, L 3, TO
+CPUTEST DONE pass=51 fail=9 skip=8

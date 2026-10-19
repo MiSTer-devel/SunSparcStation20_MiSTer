@@ -1,0 +1,178 @@
+From 5f19d00f1d25b5232239f23906f08778827c9720 Mon Sep 17 00:00:00 2001
+From: Alan Steremberg <alan.steremberg@gmail.com>
+Date: Thu, 15 Oct 2026 13:04:28 -0700
+Subject: [PATCH] Fix execl on 64-bit time_t big-endian systems; signal-safe
+ exit in spawn and looper
+
+execl: the start time is passed on as text and read back with
+sscanf("%lu") straight into a time_t. With a 64-bit time_t on a 32-bit
+big-endian CPU (NetBSD/sparc) that fills the wrong half and the test ends
+after a few execs. Read it into an unsigned long first.
+
+spawn, looper: they end their run from the SIGALRM handler with fprintf()
+and exit(). The main loop is nearly always inside fork(), and on NetBSD 11
+libc's fork() holds the dynamic linker's exclusive lock; exit() waits for
+it and the single-threaded process parks on itself for ever (ps shows
+"parked", with a zombie child). Seen every few dozen 30 s runs on a
+SPARCstation 20 (an FPGA implementation and QEMU's SS-20 alike).
+src/ub_sigsafe.h wraps signal() so the handler runs with a flag set, and
+exit() inside it is fflush() + _exit(); every other exit(), including the
+children's in the timed loop, is unchanged, so scores are unaffected. The
+two programs are linked with -z now (except on macOS), so the handler's
+first fprintf() needs no lazy binding, which takes the same lock.
+
+Tested: QEMU SS-20, NetBSD 11.0 GENERIC: 162 spawn runs over 90 minutes
+with no hang (unpatched: hangs after 5-11 minutes), spawn's counts the
+same as unpatched. Builds with the upstream Makefile on Linux (gcc).
+---
+ UnixBench/Makefile         | 12 ++++++--
+ UnixBench/src/execl.c      |  6 +++-
+ UnixBench/src/looper.c     |  1 +
+ UnixBench/src/spawn.c      |  1 +
+ UnixBench/src/ub_sigsafe.h | 56 ++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 73 insertions(+), 3 deletions(-)
+ create mode 100644 UnixBench/src/ub_sigsafe.h
+
+diff --git a/UnixBench/Makefile b/UnixBench/Makefile
+index 5b2feec..c884b92 100644
+--- a/UnixBench/Makefile
++++ b/UnixBench/Makefile
+@@ -234,6 +234,12 @@ programs: $(BINS)
+ $(PROGDIR)/%:
+ 	$(CC) -o $@ $(CFLAGS) $< $(LDFLAGS)
+ 
++# spawn and looper bind at load (src/ub_sigsafe.h); not on macOS, whose
++# linker has no -z now
++ifneq ($(shell uname -s),Darwin)
++  BIND_NOW = -Wl,-z,now
++endif
++
+ # Individual programs
+ # Sometimes the same source file is compiled in different ways.
+ # This limits the 'make' patterns that can usefully be applied.
+@@ -268,7 +274,8 @@ $(PROGDIR)/pipe: $(SRCDIR)/pipe.c $(SRCDIR)/timeit.c
+ 
+ $(PROGDIR)/execl: $(SRCDIR)/execl.c $(SRCDIR)/big.c
+ 
+-$(PROGDIR)/spawn: $(SRCDIR)/spawn.c $(SRCDIR)/timeit.c
++$(PROGDIR)/spawn: $(SRCDIR)/spawn.c $(SRCDIR)/timeit.c $(SRCDIR)/ub_sigsafe.h
++$(PROGDIR)/spawn: LDFLAGS += $(BIND_NOW)
+ 
+ $(PROGDIR)/hanoi: $(SRCDIR)/hanoi.c $(SRCDIR)/timeit.c
+ 
+@@ -278,7 +285,8 @@ $(PROGDIR)/syscall: $(SRCDIR)/syscall.c $(SRCDIR)/timeit.c
+ 
+ $(PROGDIR)/context1: $(SRCDIR)/context1.c $(SRCDIR)/timeit.c
+ 
+-$(PROGDIR)/looper: $(SRCDIR)/looper.c $(SRCDIR)/timeit.c
++$(PROGDIR)/looper: $(SRCDIR)/looper.c $(SRCDIR)/timeit.c $(SRCDIR)/ub_sigsafe.h
++$(PROGDIR)/looper: LDFLAGS += $(BIND_NOW)
+ 
+ $(PROGDIR)/ubgears: $(SRCDIR)/ubgears.c
+ $(PROGDIR)/ubgears: LDFLAGS += -lm $(GL_LIBS)
+diff --git a/UnixBench/src/execl.c b/UnixBench/src/execl.c
+index 98f03dc..ad64ddd 100644
+--- a/UnixBench/src/execl.c
++++ b/UnixBench/src/execl.c
+@@ -79,7 +79,11 @@ char	*argv[];
+ 		duration = atoi(argv[2]);
+ 		dur_str = argv[2];
+ 		iter = (unsigned long)atoi(argv[3]); /* where are we now ? */
+-		sscanf(argv[4], "%lu", (unsigned long *) &start_time);
++		/* start_time is a time_t, 64 bits on NetBSD and others even
++		   on 32-bit CPUs: scanning "%lu" straight into it fills the
++		   wrong half on big-endian ones (SPARC) and the test ends
++		   after a few execs */
++		{ unsigned long st_; sscanf(argv[4], "%lu", &st_); start_time = st_; }
+ 		fullpath = argv[0];
+ 		}
+ 
+diff --git a/UnixBench/src/looper.c b/UnixBench/src/looper.c
+index 2ffa103..a769ed4 100644
+--- a/UnixBench/src/looper.c
++++ b/UnixBench/src/looper.c
+@@ -25,6 +25,7 @@ char SCCSid[] = "@(#) @(#)looper.c:1.4 -- 5/15/91 19:30:22";
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <sys/wait.h>
++#include "ub_sigsafe.h"
+ #include "timeit.c"
+ 
+ volatile unsigned long iter;
+diff --git a/UnixBench/src/spawn.c b/UnixBench/src/spawn.c
+index f41721b..0b28272 100644
+--- a/UnixBench/src/spawn.c
++++ b/UnixBench/src/spawn.c
+@@ -25,6 +25,7 @@ char SCCSid[] = "@(#) @(#)spawn.c:3.3 -- 5/15/91 19:30:20";
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <sys/wait.h>
++#include "ub_sigsafe.h"
+ #include "timeit.c"
+ 
+ volatile unsigned long iter;
+diff --git a/UnixBench/src/ub_sigsafe.h b/UnixBench/src/ub_sigsafe.h
+new file mode 100644
+index 0000000..82a6150
+--- /dev/null
++++ b/UnixBench/src/ub_sigsafe.h
+@@ -0,0 +1,56 @@
++/*
++ * ub_sigsafe.h - an exit() that is safe in spawn's and looper's SIGALRM
++ * handler (report()).
++ *
++ * Both end their run from the handler with fprintf() and exit(). The main
++ * loop is nearly always inside fork(), and on NetBSD 11 libc's fork()
++ * holds the dynamic linker's exclusive lock: exit() (its atexit/finalize
++ * path) waits for that lock, and the single-threaded process parks on
++ * itself for ever (_lwp_park from ld.elf_so; "parked" in ps). Seen on a
++ * SPARCstation 20 (an FPGA core and QEMU's SS-20 alike) every few dozen
++ * 30 s runs; looper (the shell tests) the same way.
++ *
++ * Here signal() is wrapped so the handler runs with a flag set, and
++ * exit() inside it is fflush() + _exit(); every other exit() -- the
++ * children's in the timed loop -- is the real one, so the loops cost
++ * what they did. The Makefile links these two with -z now, so the
++ * handler's first fprintf() needs no lazy binding (which takes the same
++ * lock).
++ */
++#ifndef UB_SIGSAFE_H
++#define UB_SIGSAFE_H
++#include <signal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++static volatile sig_atomic_t ub_in_handler;
++static void (*ub_handler)(int);
++
++static void ub_exit(int c)
++{
++	if (ub_in_handler) {
++		fflush(NULL);
++		_exit(c);
++	}
++	exit(c);
++}
++
++static void ub_wrap(int sig)
++{
++	ub_in_handler = 1;
++	ub_handler(sig);
++	ub_in_handler = 0;
++}
++
++static void (*ub_signal(int sig, void (*f)(int)))(int)
++{
++	if (f == SIG_IGN || f == SIG_DFL)
++		return signal(sig, f);
++	ub_handler = f;
++	return signal(sig, ub_wrap);
++}
++
++#define exit ub_exit
++#define signal ub_signal
++#endif
+-- 
+2.54.0 (Apple Git-157)
+

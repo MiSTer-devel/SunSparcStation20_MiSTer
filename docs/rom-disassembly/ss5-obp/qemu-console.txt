@@ -1,0 +1,81 @@
+# serial console of the real PROM under qemu-system-sparc 8.2.2 (tools/romdis/qemu_trace.py)
+# NULs and backspace-overwritten progress counters removed
+
+
+Power-ON Reset
+
+$$$$$ WARNING: No Keyboard Detected! $$$$$
+MMU Context Table Reg Test   
+MMU Context Register Test    
+MMU TLB Replace Ctrl Reg Tst 
+MMU Sync Fault Stat Reg Test 
+MMU Sync Fault Addr Reg Test 
+MMU TLB RAM NTA Pattern Test 
+	ERROR  : Address= 000000fc, exp= 07ffffdc, obs= 00000000, xor= 07ffffdc
+initializing TLB
+
+initializing cache
+
+Allocating SRMMU Context Table 
+
+Setting SRMMU Context Register
+
+Setting SRMMU Context Table Pointer Register
+
+Allocating SRMMU Level 1 Table
+Mapping RAM
+
+Mapping ROM
+
+ttya initialized
+Probing Memory Bank #0 32 Megabytes
+Probing Memory Bank #1 32 Megabytes
+Probing Memory Bank #2 Nothing there
+Probing Memory Bank #3 Nothing there
+Probing Memory Bank #4 Nothing there
+Probing Memory Bank #5 Nothing there
+Probing Memory Bank #6 Nothing there
+Probing Memory Bank #7 Nothing there
+Incorrect configuration checksum; 
+Setting NVRAM parameters to default values.
+Setting diag-switch? NVRAM parameter to true
+Probing CPU FMI,MB86904 
+Probing /iommu@0,10000000/sbus@0,10001000 at 5,0  espdma esp sd st SUNW,bpp ledma le 
+Probing /iommu@0,10000000/sbus@0,10001000 at 4,0  SUNW,CS4231 power-management 
+Probing /iommu@0,10000000/sbus@0,10001000 at 1,0  Nothing there
+Probing /iommu@0,10000000/sbus@0,10001000 at 2,0  Nothing there
+Probing /iommu@0,10000000/sbus@0,10001000 at 3,0  SUNW,tcx 
+Probing /iommu@0,10000000/sbus@0,10001000 at 0,0  Nothing there
+Probing Memory Bank #0 32 Megabytes
+Probing Memory Bank #1 32 Megabytes
+Probing Memory Bank #2 Nothing there
+Probing Memory Bank #3 Nothing there
+Probing Memory Bank #4 Nothing there
+Probing Memory Bank #5 Nothing there
+Probing Memory Bank #6 Nothing there
+Probing Memory Bank #7 Nothing there
+Incorrect configuration checksum; 
+Setting NVRAM parameters to default values.
+Setting diag-switch? NVRAM parameter to true
+Probing CPU FMI,MB86904 
+Probing /iommu@0,10000000/sbus@0,10001000 at 5,0  espdma esp sd st SUNW,bpp ledma le 
+Probing /iommu@0,10000000/sbus@0,10001000 at 4,0  SUNW,CS4231 power-management 
+Probing /iommu@0,10000000/sbus@0,10001000 at 1,0  Nothing there
+Probing /iommu@0,10000000/sbus@0,10001000 at 2,0  Nothing there
+Probing /iommu@0,10000000/sbus@0,10001000 at 3,0  SUNW,tcx 
+Probing /iommu@0,10000000/sbus@0,10001000 at 0,0  Nothing there
+
+SPARCstation 5, No Keyboard
+ROM Rev. 2.15, 64 MB memory installed, Serial #1193046.
+Ethernet address 52:54:0:12:34:56, Host ID: 80123456.
+
+                                                                      
+
+                                                                      
+Boot device: /iommu/sbus/ledma@5,8400010/le@5,8c00000  File and args: 
+Internal loopback test -- Wrong packet length; expected 36, observed 64 
+
+Can't open boot device
+
+Type  help  for more information
+ok qemu-system-sparc: terminating on signal 15 from pid 2393026 (timeout)

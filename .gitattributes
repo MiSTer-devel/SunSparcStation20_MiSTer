@@ -1,0 +1,22 @@
+# Line endings: most sources are stored with LF. The MiSTer framework (sys/)
+# and a few template files carry CRLF as the template ships them, so there is
+# no blanket "* text=auto" (it would renormalize those blobs); only the types
+# below are pinned.
+
+# Shell scripts must stay LF: they also run on the MiSTer (Linux). (clean.bat
+# is stored as the template ships it.)
+*.sh   text eol=lf
+*.py   text eol=lf
+
+# Binaries: never touch line endings, no textual diffs.
+*.rbf  binary
+*.rom  binary
+*.nvr  binary
+*.bin  binary
+*.sof  binary
+*.mif  binary
+*.png  binary
+*.jpg  binary
+*.zip  binary
+*.gz   binary
+releases/MiSTer binary

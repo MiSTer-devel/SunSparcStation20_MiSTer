@@ -1,0 +1,9 @@
+CPUTEST ss20 psr=40400fc0 nwindows=8 fpu=1
+KBD?
+4d cd 7f 01 4d cd 81 7f 0d 36 b6 8d 7f 76 f6 7f 15 
+95 7f 16 96 7f 05 85 7f 
+RST?
+01 4d 
+ff 04 01 4d 7f cd 81 7f 
+PASS kbd: the keys typed, as Sun codes, then the reset reply
+CPUTEST DONE pass=1 fail=0 skip=0
