@@ -242,20 +242,29 @@ module iu
   // synthesis translate_off
   initial for (int i = 0; i < 512; i++) bht[i] = 2'd0;
   // synthesis translate_on
+  // The targets are formed from the word's fields and the stack's top side
+  // by side, and what the word is only picks one: the path from the cache
+  // through the decode into f_pc/f_npc is the tightest here.
+  logic [31:0] pr_tbr, pr_tbr4, pr_tcall, pr_tcall4, pr_tret, pr_tret4;
+  logic        ras_ok;         // the top may be used (registers only)
   always_comb begin
     logic [31:0] inst;
     logic        bcc, call, back, ret;
-    logic [31:0] disp;
     inst = ifetch_rsp_i.inst;
     bcc  = inst[31:30] == 2'b00 && (inst[24:22] == 3'b010 || inst[24:22] == 3'b110);   // Bicc, FBfcc
     call = inst[31:30] == 2'b01;
     back = inst[21];                                                                 // disp22 < 0
     // ret, retl; not to pc + 4 (as for the branches below: the target would have the slot's pc)
-    ret  = (inst == 32'h81C7E008 || inst == 32'h81C3E008) && ras_cnt != 4'd0 &&
-           ras_top != f_pend_pc[31:2] - 30'd1;
-    disp = call ? {inst[29:0], 2'b00} : {{8{inst[21]}}, inst[21:0], 2'b00};
-    pr_target  = ret ? {ras_top + 30'd2, 2'b00} : f_pend_pc + disp;
-    pr_target4 = ret ? {ras_top + 30'd3, 2'b00} : (f_pend_pc + 32'd4) + disp;
+    ras_ok = ras_cnt != 4'd0 && ras_top != f_pend_pc[31:2] - 30'd1;
+    ret  = (inst == 32'h81C7E008 || inst == 32'h81C3E008) && ras_ok;
+    pr_tbr    = f_pend_pc + {{8{inst[21]}}, inst[21:0], 2'b00};
+    pr_tbr4   = (f_pend_pc + 32'd4) + {{8{inst[21]}}, inst[21:0], 2'b00};
+    pr_tcall  = f_pend_pc + {inst[29:0], 2'b00};
+    pr_tcall4 = (f_pend_pc + 32'd4) + {inst[29:0], 2'b00};
+    pr_tret   = {ras_top + 30'd2, 2'b00};
+    pr_tret4  = {ras_top + 30'd3, 2'b00};
+    pr_target  = ret ? pr_tret  : call ? pr_tcall  : pr_tbr;
+    pr_target4 = ret ? pr_tret4 : call ? pr_tcall4 : pr_tbr4;
     pr_inf     = ret ? ras_top : {28'd0, bht_q};
     pr_ok = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 &&
             (ret || ((call || (bcc && (inst[28:25] == 4'h8 || (inst[28:25] != 4'h0 && (back ^ bht_q[1]))))) &&
