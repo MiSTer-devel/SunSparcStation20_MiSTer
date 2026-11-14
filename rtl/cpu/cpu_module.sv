@@ -71,10 +71,14 @@ module cpu_module
   logic        ic_fast;                // (the I-cache has no fast path)
   logic [15:0] dbg_pipe;
   logic [8:0]  d_nidx;                 // the IU's next M index: the D-cache's RAMs are read a cycle ahead
+  logic [19:0] d_apage, d_bpage;       // ... and the pages E's address registers name (the micro-TLB looks them up ahead)
+  logic        d_bsel;                 // rs2's is the address's page (rs1 is an offset)
+  logic        d_ego;                  // E hands its instruction to M at this edge
   logic [7:0]  dbg_mmu, dbg_ic, dbg_dc;
 
   iu #(.HAS_FPU(HAS_FPU)) u_iu (
-    .clk, .rst(iu_rst), .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_nidx_o(d_nidx), .dmem_rsp_i(dms),
+    .clk, .rst(iu_rst), .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_nidx_o(d_nidx),
+    .dmem_apage_o(d_apage), .dmem_bpage_o(d_bpage), .dmem_bsel_o(d_bsel), .dmem_ego_o(d_ego), .dmem_rsp_i(dms),
     .fpu_req_o(fpr), .fpu_rsp_i(fps), .irl_i, .error_o(iu_error), .cwp_o(iu_cwp), .halt_o(iu_halt),
     .dbg_commit_o, .dbg_trap_o, .dbg_tt_o, .dbg_pc_o, .dbg_psr_o, .dbg_pipe_o(dbg_pipe));
 
@@ -580,21 +584,59 @@ module cpu_module
   localparam int DUT = 8;
   logic        dut_v [DUT];
   logic [19:0] dut_vtag [DUT];
-  (* ramstyle = "MLAB, no_rw_check" *) logic [23:0] dut_ppn [DUT];   // as ut_ppn
+  logic [23:0] dut_ppn [DUT];          // (registers: read by a one-hot match, three times over)
   logic [2:0]  dut_acc [DUT];
   logic        dut_m [DUT];
   logic [2:0]  dut_wp;
   logic        dut_hit, dut_ok, dut_m_hit;
   logic [35:0] dut_pa;
   logic [2:0]  dut_acc_hit, dut_k;
-  always_comb begin
-    dut_hit = 1'b0; dut_k = '0; dut_acc_hit = '0; dut_m_hit = 1'b0;
-    for (int k = 0; k < DUT; k++) begin
-      if (dut_v[k] && dut_vtag[k] == dmr.va[31:12]) begin
-        dut_hit = 1'b1; dut_k = 3'(k); dut_acc_hit = dut_acc[k]; dut_m_hit = dut_m[k];
+  // The lookup is made a cycle ahead and registered (pre_*): of the page
+  // of E's base register when E hands its instruction to M at this edge
+  // (the address is in that page unless the offset leaves it), else of the
+  // page M's own address is in. In M the registered answer counts when its
+  // page is the address's (pre_exact); if not -- the offset left the page,
+  // or the entries changed under the lookup -- the request waits a cycle,
+  // and the answer is then the one for its own page. So the tag compare of
+  // the cache starts from a registered physical page, and E's adder is not
+  // followed by the lookup.
+  // Three lookups side by side (rs1's page, rs2's, M's own), each a
+  // one-hot match that gates the entries' fields (no index, no RAM read:
+  // this hangs off E's forwarding), and the choice among them last.
+  typedef struct packed { logic hit; logic m; logic [2:0] acc; logic [2:0] k; logic [23:0] ppn; } dut_ans_t;
+  function automatic dut_ans_t dut_look(input logic [19:0] page);
+    dut_ans_t r;
+    r = '0;
+    for (int k = 0; k < DUT; k++)
+      if (dut_v[k] && dut_vtag[k] == page) begin
+        r.hit = 1'b1; r.m = r.m | dut_m[k]; r.acc = r.acc | dut_acc[k]; r.k = r.k | 3'(k); r.ppn = r.ppn | dut_ppn[k];
       end
-    end
-    dut_pa = {dut_ppn[dut_k], dmr.va[11:0]};
+    return r;
+  endfunction
+  dut_ans_t    la, lb, lm, lsel;
+  assign la = dut_look(d_apage);
+  assign lb = dut_look(d_bpage);
+  assign lm = dut_look(dmr.va[31:12]);
+  assign lsel = !d_ego ? lm : d_bsel ? lb : la;
+  logic        pre_known, pre_hit, pre_m, pre_exact;
+  logic [19:0] pre_page;
+  logic [23:0] pre_ppn;
+  logic [2:0]  pre_k, pre_acc;
+  logic        dut_fill_q_w;           // (dut_fill_q, declared below)
+  always_ff @(posedge clk) begin
+    // (a fill or a flush lands at this edge: what was looked up is old)
+    pre_known <= !(rst || tlb_changed || dut_fill_q_w);
+    pre_page  <= !d_ego ? dmr.va[31:12] : d_bsel ? d_bpage : d_apage;
+    pre_hit   <= lsel.hit;
+    pre_k     <= lsel.k;
+    pre_acc   <= lsel.acc;
+    pre_m     <= lsel.m;
+    pre_ppn   <= lsel.ppn;
+  end
+  assign pre_exact = pre_known && pre_page == dmr.va[31:12];
+  always_comb begin
+    dut_hit = pre_exact && pre_hit; dut_k = pre_k; dut_acc_hit = pre_acc; dut_m_hit = pre_m;
+    dut_pa = {pre_ppn, dmr.va[11:0]};
     dut_ok = d_direct || (dut_hit && acc_fault(d_at, dut_acc_hit) == FT_NONE && (!d_at[2] || dut_m_hit));
   end
   logic [35:0] d_fast_pa;
@@ -602,6 +644,7 @@ module cpu_module
 
   // Filled one cycle after the MMU's answer, from a registered copy
   logic        dut_fill, dut_fill_q;
+  assign dut_fill_q_w = dut_fill_q;
   logic [19:0] dut_fill_vtag;
   logic [23:0] dut_fill_ppn;
   logic [2:0]  dut_fill_acc;
@@ -744,9 +787,9 @@ module cpu_module
                 d_pa <= d_fast_pa;
                 d_cacheable <= cacheable_pa(d_fast_pa);
                 if (!dc_fast) ds <= D_CACHE;   // (a read hit with its lines read ahead: answered now)
-              end else begin
+              end else if (d_direct || pre_exact) begin
                 ds <= D_XLAT;                  // the MMU's TLB: misses, faults and walks are found there
-              end
+              end                              // (else: the micro-TLB's answer for this page comes next cycle)
             end else if (d_bypass) begin
               d_pa <= {dmr.asi[3:0], dmr.va};
               d_cacheable <= 1'b0;

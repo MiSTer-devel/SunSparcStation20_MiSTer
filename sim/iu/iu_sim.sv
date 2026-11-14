@@ -42,7 +42,7 @@ module iu_sim
                              .fpu_req_o(fpr), .fpu_rsp_i(fps),
                              .irl_i(4'd0), .error_o(error), .cwp_o(cwp), .halt_o(halt),
                              /* verilator lint_off PINCONNECTEMPTY */
-                             .dmem_nidx_o(), .dbg_commit_o(), .dbg_trap_o(), .dbg_tt_o(), .dbg_pc_o(), .dbg_psr_o(), .dbg_pipe_o());
+                             .dmem_nidx_o(), .dmem_apage_o(), .dmem_bpage_o(), .dmem_bsel_o(), .dmem_ego_o(), .dbg_commit_o(), .dbg_trap_o(), .dbg_tt_o(), .dbg_pc_o(), .dbg_psr_o(), .dbg_pipe_o());
                              /* verilator lint_on PINCONNECTEMPTY */
   fpu u_fpu (.clk, .rst, .req_i(fpr), .rsp_o(fps));
 

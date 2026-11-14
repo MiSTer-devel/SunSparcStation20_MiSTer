@@ -73,6 +73,10 @@ module iu
   input  ifetch_rsp_t ifetch_rsp_i,
   output dmem_req_t   dmem_req_o,
   output logic [8:0]  dmem_nidx_o,    // the doubleword index (VA[11:3]) M holds next cycle: the D-cache reads its RAMs ahead
+  output logic [19:0] dmem_apage_o,   // the pages of E's two address registers (forwarded): the module translates
+  output logic [19:0] dmem_bpage_o,   // ... both ahead, for the request M makes next cycle when E moves on,
+  output logic        dmem_bsel_o,    // ... and takes rs2's when rs1 is only an offset within a page
+  output logic        dmem_ego_o,     // E moves on at this edge (else M keeps its own address)
   input  dmem_rsp_t   dmem_rsp_i,
   output fpu_pkg::fpu_req_t fpu_req_o,
   input  fpu_pkg::fpu_rsp_t fpu_rsp_i,
@@ -1064,6 +1068,18 @@ module iu
   // and for any other class M makes no request next cycle, so the index
   // is not used; this keeps the result mux off the RAM address path.
   assign dmem_nidx_o = e_go ? e_addr[11:3] : m_result[11:3];
+  // The page, though, not from the adder: the base register's, which is
+  // the address's unless the offset leaves the page (the module checks in
+  // M and translates again then, a cycle later). The micro-TLB lookup then
+  // runs beside the adder in E, not behind it or in front of the cache's
+  // tag compare in M: those were the two longest paths of the CPU.
+  // (With two registers the base may be either: rs2's page when rs1 is
+  // only an offset within a page, as in "ld [%index + %base]". Both are
+  // looked up, and which one counts is decided beside the lookups.)
+  assign dmem_apage_o = a[31:12];
+  assign dmem_bpage_o = b_fwd[31:12];
+  assign dmem_bsel_o  = !e_dec.imm && a[31:12] == 20'd0;
+  assign dmem_ego_o   = e_go;
 
   assign m_go    = m_valid && !w_stall && (!m_is_mem || m_acked || (FAST_ACK && m_done));
   assign m_stall = m_valid && !m_go;
