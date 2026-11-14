@@ -75,8 +75,8 @@ module fp_round
   //    look at the exponent that results.
   logic signed [13:0] emin, emax;
   logic [52:0] kept_n;
-  logic        guard_n, sticky_n, up_n, carry_n;
-  logic        tiny1;
+  logic        guard_n, sticky_n, ones_n;
+  logic        t_low1, t_edge1;
 
   always_comb begin
     emin = dbl_i ? -14'sd1022 : -14'sd126;
@@ -86,9 +86,13 @@ module fp_round
     end else begin
       kept_n = {mn1[57:34], 29'd0}; guard_n = mn1[33]; sticky_n = (|mn1[32:0]) | v_i.sticky;
     end
-    up_n = round_up_f(rd_i, v_i.sign, dbl_i ? kept_n[0] : kept_n[29], guard_n, sticky_n);
-    carry_n = up_n && (dbl_i ? (&kept_n) : (&kept_n[52:29]));
-    tiny1 = !is_zero1 && ((en1 < emin - 14'sd1) || (en1 == emin - 14'sd1 && !carry_n));
+    // Tiny below emin - 1; at emin - 1 unless the rounding carries into
+    // emin. Only the parts are formed here; the rounding decision and the
+    // carry are finished from their registers in the next cycle (the
+    // normalisation before them is this stage's length already).
+    ones_n  = dbl_i ? (&kept_n) : (&kept_n[52:29]);
+    t_low1  = !is_zero1 && en1 < emin - 14'sd1;
+    t_edge1 = !is_zero1 && en1 == emin - 14'sd1;
   end
 
   // The stage register; held, a tiny value moves down a bit a cycle to
@@ -97,13 +101,17 @@ module fp_round
   logic [57:0] mn;
   logic signed [13:0] en;
   logic        is_zero, tiny, sign, sticky_in;
+  logic        t_low, t_edge, ones_q, lsb_q, guard_q, sticky_q;
+  assign tiny = t_low || (t_edge && !(ones_q && round_up_f(rd_i, sign, lsb_q, guard_q, sticky_q)));
   logic        dn_step;
   assign dn_step = tiny && en < emin && mn != '0;
   assign busy_o  = dn_step;
   assign tiny_o  = tiny;
   always_ff @(posedge clk) begin
     if (!hold_i) begin
-      mn <= mn1; en <= en1; is_zero <= is_zero1; tiny <= tiny1;
+      mn <= mn1; en <= en1; is_zero <= is_zero1;
+      t_low <= t_low1; t_edge <= t_edge1; ones_q <= ones_n;
+      lsb_q <= dbl_i ? kept_n[0] : kept_n[29]; guard_q <= guard_n; sticky_q <= sticky_n;
       sign <= v_i.sign; sticky_in <= v_i.sticky;
     end else if (dn_step) begin
       mn <= mn >> 1; en <= en + 14'sd1; sticky_in <= sticky_in | mn[0];
