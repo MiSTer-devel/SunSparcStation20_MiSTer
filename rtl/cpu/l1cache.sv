@@ -215,7 +215,19 @@ module l1cache
   localparam int WB_DEPTH = 4;
   logic [35:3] wb_pa [WB_DEPTH];
   logic [7:0]  wb_be [WB_DEPTH];
-  logic [63:0] wb_d  [WB_DEPTH];
+  // the data: a small RAM per byte lane, each with its own write enable
+  // (a store that joins an entry writes only its bytes)
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d0 [WB_DEPTH];
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d1 [WB_DEPTH];
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d2 [WB_DEPTH];
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d3 [WB_DEPTH];
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d4 [WB_DEPTH];
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d5 [WB_DEPTH];
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d6 [WB_DEPTH];
+  (* ramstyle = "MLAB" *) logic [7:0] wb_d7 [WB_DEPTH];
+  logic [63:0] wb_head_d;
+  logic [1:0]  wb_wa;                  // the entry a pushed store's bytes go to
+  logic [7:0]  wb_wbe;
   logic [1:0]  wb_rd, wb_wr;
   logic [2:0]  wb_cnt;
   logic        wb_busy, wb_pop, wb_push, wb_room;
@@ -224,6 +236,36 @@ module l1cache
   assign wb_room    = wb_cnt != 3'(WB_DEPTH) || wb_pop;
   assign wb_empty_o = !wb_busy;
   assign wb_push    = !ICACHE && ((st == S_WRITE_WAIT && wb_room) || fast_st);
+  // A store to the doubleword of the newest entry joins it, unless that
+  // entry is the head (it is on the memory port, and must not change
+  // there): the bytes of a byte or word loop -- strcpy, a structure copy,
+  // the two words of a doubleword -- then cost one memory write, not one
+  // each, and such a loop no longer runs at the speed of the memory.
+  // Only the newest entry, so the stores still reach memory in order.
+  logic [1:0]  wb_tail;
+  logic [35:3] wb_new_pa;
+  logic [7:0]  wb_new_be;
+  logic [63:0] wb_new_d;
+  logic        wb_merge;
+  assign wb_tail   = wb_wr - 2'd1;
+  assign wb_new_pa = fast_st ? pa_i[35:3] : r_pa[35:3];
+  assign wb_new_be = fast_st ? be_i : r_be;
+  assign wb_new_d  = fast_st ? wdata_i : r_wdata;
+  assign wb_merge  = wb_push && wb_cnt >= 3'd2 && wb_pa[wb_tail] == wb_new_pa;
+  assign wb_wa     = wb_merge ? wb_tail : wb_wr;
+  assign wb_wbe    = {8{wb_push}} & (wb_merge ? wb_new_be : 8'hFF);
+  assign wb_head_d = {wb_d7[wb_rd], wb_d6[wb_rd], wb_d5[wb_rd], wb_d4[wb_rd],
+                      wb_d3[wb_rd], wb_d2[wb_rd], wb_d1[wb_rd], wb_d0[wb_rd]};
+  always_ff @(posedge clk) begin
+    if (wb_wbe[0]) wb_d0[wb_wa] <= wb_new_d[7:0];
+    if (wb_wbe[1]) wb_d1[wb_wa] <= wb_new_d[15:8];
+    if (wb_wbe[2]) wb_d2[wb_wa] <= wb_new_d[23:16];
+    if (wb_wbe[3]) wb_d3[wb_wa] <= wb_new_d[31:24];
+    if (wb_wbe[4]) wb_d4[wb_wa] <= wb_new_d[39:32];
+    if (wb_wbe[5]) wb_d5[wb_wa] <= wb_new_d[47:40];
+    if (wb_wbe[6]) wb_d6[wb_wa] <= wb_new_d[55:48];
+    if (wb_wbe[7]) wb_d7[wb_wa] <= wb_new_d[63:56];
+  end
   // the acknowledgement of this cache's own request (not of a buffered write)
   logic ack;
   assign ack = mem_rsp_i.ack && !wb_busy;
@@ -526,7 +568,7 @@ module l1cache
     mem_req_o = '0;
     if (wb_busy) begin
       mem_req_o.valid = 1'b1; mem_req_o.write = 1'b1;
-      mem_req_o.pa = {wb_pa[wb_rd], 3'b000}; mem_req_o.be = wb_be[wb_rd]; mem_req_o.wdata = wb_d[wb_rd];
+      mem_req_o.pa = {wb_pa[wb_rd], 3'b000}; mem_req_o.be = wb_be[wb_rd]; mem_req_o.wdata = wb_head_d;
     end else
     case (st)
       S_FILL: begin
@@ -600,10 +642,10 @@ module l1cache
 
   // FAST_HIT: the port A outputs are this request's when last cycle's index
   // was its doubleword's and port B did not write that address meanwhile
-  // (the RAMs return the old word then): then a cacheable read compares on
+  // (the RAMs return the old word then; pbt_q for the tags, pbd_q the data): then a cacheable read compares on
   // pa_i now and answers, and the next request may come in the next cycle.
   logic [8:0] ra_q;                    // the index port A read last cycle
-  logic       pbw_q;                   // port B wrote it (tags or data) in that cycle
+  logic       pbt_q, pbd_q;            // port B wrote its tags / its data in that cycle
   logic       fhit;
   always_comb begin
     fhit_way = '0;
@@ -615,13 +657,16 @@ module l1cache
   end
   logic fast_ok;
   assign fast_ok = FAST_HIT && !ICACHE && st == S_IDLE && freq_i && can_take && !atomic_i && cacheable_i && enable_i &&
-                   ra_q == pa_i[11:3] && !pbw_q;
-  assign fast_ld = fast_ok && !we_i && fhit;
+                   ra_q == pa_i[11:3] && !pbt_q;
+  assign fast_ld = fast_ok && !we_i && fhit && !pbd_q;
+  // (a store needs the tags only: one right behind a store to the same
+  // doubleword -- two words of a doubleword, a memset by words -- is fast too)
   assign fast_st = fast_ok && we_i && wb_room;   // updates a hit line, enters the write buffer
   assign fast    = fast_ld || fast_st;
   always_ff @(posedge clk) begin
     ra_q    <= idx_i;
-    pbw_q   <= (db_we && db_addr == idx_i) || (|tb_we_way && tb_addr == idx_i[8 -: SET_W]);
+    pbt_q   <= |tb_we_way && tb_addr == idx_i[8 -: SET_W];
+    pbd_q   <= db_we && db_addr == idx_i;
     sbw_q   <= sb_we && sb_addr == idx_i[8 -: SET_W];
     sbw_d_q <= sb_wdata;
   end
@@ -718,13 +763,14 @@ module l1cache
       // the store's bytes for the next request's compare cycle
 
       // ---- the write buffer ----
-      if (wb_push) begin
-        if (fast_st) begin wb_pa[wb_wr] <= pa_i[35:3]; wb_be[wb_wr] <= be_i; wb_d[wb_wr] <= wdata_i; end
-        else         begin wb_pa[wb_wr] <= r_pa[35:3]; wb_be[wb_wr] <= r_be; wb_d[wb_wr] <= r_wdata; end
+      if (wb_merge) begin
+        wb_be[wb_tail] <= wb_be[wb_tail] | wb_new_be;
+      end else if (wb_push) begin
+        wb_pa[wb_wr] <= wb_new_pa; wb_be[wb_wr] <= wb_new_be;
         wb_wr <= wb_wr + 2'd1;
       end
       if (wb_pop) wb_rd <= wb_rd + 2'd1;
-      wb_cnt <= wb_cnt + {2'd0, wb_push} - {2'd0, wb_pop};
+      wb_cnt <= wb_cnt + {2'd0, wb_push & ~wb_merge} - {2'd0, wb_pop};
 `ifndef SYNTHESIS
       if (wb_pop && mem_rsp_i.err)
         $display("%0t l1cache: a buffered store to pa %09x answered an error (dropped)", $time, {wb_pa[wb_rd], 3'b000});

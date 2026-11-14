@@ -15,7 +15,7 @@
 //   acceptance suite.
 //
 // Stage summary:
-//   F  (pc, npc) -> ifetch; one fetch outstanding, a one-entry buffer when
+//   F  (pc, npc) -> ifetch; one fetch outstanding, a two-entry buffer when
 //      D cannot take the response. A taken DCTI in E changes the npc of its
 //      delay slot (in D or still to be fetched) and drops whatever was
 //      fetched after it.
@@ -53,9 +53,12 @@ module iu
   // hit: one cycle less a load or store), taking the data and fault from
   // the answer itself; else from the next cycle, from registers
   parameter bit FAST_ACK = 1'b1,
-  // BPRED: a Bicc/FBfcc that branches back, BA/FBA and CALL are predicted
-  // taken as they arrive from the cache (the fetch after their delay slot
-  // is their target); E redirects only when the guess was wrong (to pc+8)
+  // BPRED: BA/FBA and CALL are predicted taken as they arrive from the
+  // cache (the fetch after their delay slot is their target); a conditional
+  // Bicc/FBfcc by its direction (back: taken) unless its history says the
+  // direction is usually wrong; "ret" and "retl" go to the address after
+  // the last call's (a small return stack). E redirects only when the guess
+  // was wrong
   parameter bit BPRED = 1'b1,
   // FP_OVERLAP: an FPop or FP load does not wait in D for the FP work ahead;
   // it waits in W, where it meets the FPU, until the FPU is idle (and takes
@@ -136,6 +139,7 @@ module iu
   logic [7:0]  m_tt;
   logic [31:0] m_result;       // the ALU result / address / link / rd value; the wr %y/%psr/%wim/%tbr value
   logic [63:0] m_wdata;        // store data (rs3, rs4) after forwarding
+  logic        m_wd_late;      // ... but for the word the load now in W read: the store followed it directly
   logic [3:0]  m_icc;
   logic        m_wicc;         // writes icc
   logic [31:0] m_y;
@@ -178,9 +182,18 @@ module iu
   logic        f_pending;      // a fetch is outstanding
   logic [31:0] f_pend_pc, f_pend_npc;
   logic        f_pend_discard; // the outstanding fetch is for a dropped path
-  logic        f_have;         // the one-entry buffer holds an instruction
+  // The buffer: two entries in order. D takes the head (f_buf_*); the
+  // second (f_b2_*) is there so that a fetch can be issued while the head
+  // still waits for D: with one entry the fetch stopped until the buffer
+  // was empty, and every stall of D was followed by an empty cycle in D
+  // two cycles later (4-12 % of all cycles in loops with a load-use pair).
+  logic        f_have;         // the head holds an instruction
   logic [31:0] f_buf_inst, f_buf_pc, f_buf_npc;
   logic [1:0]  f_buf_fault;
+  logic        f_have2;        // so does the second entry (only behind a full head)
+  logic [31:0] f_b2_inst, f_b2_pc, f_b2_npc;
+  logic [1:0]  f_b2_fault;
+  logic        f_b2_pred;
   logic        f_annul_next;   // the next instruction to enter D is an annulled delay slot
   logic        f_buf_annul;    // the buffered instruction is an annulled delay slot
   logic        f_slot_pending; // the delay slot of the DCTI in E has not entered D yet
@@ -191,9 +204,9 @@ module iu
   // not take from it this cycle); one for a dropped path is always taken.
   // (f_take_buf is f_take when the buffer holds the instruction for D.)
   logic        f_take_buf, rsp_ready, rsp_taken, rsp_to_buf;
-  assign rsp_ready = f_pend_discard | ~f_have | f_take_buf;
+  assign rsp_ready = f_pend_discard | ~f_have2 | f_take_buf;
   assign rsp_taken = ifetch_rsp_i.valid & rsp_ready;
-  assign rsp_valid = ifetch_rsp_i.valid & f_pending & ~f_pend_discard & (~f_have | f_take_buf);
+  assign rsp_valid = ifetch_rsp_i.valid & f_pending & ~f_pend_discard & (~f_have2 | f_take_buf);
 
   // BPRED: the instruction arriving now, if a DCTI predicted taken whose
   // delay slot has not been issued before this cycle (it is issued now, or
@@ -203,37 +216,87 @@ module iu
   // "ba,a .+4; wr %tbr"): the slot and the target would have the same pc,
   // the slot is known by its pc, and annulling the slot annulled the target.
   // (Bits 21:0 only, for CALL too: a call that loses its guess is harmless.)
+  //
+  // The history: 512 two-bit counters by pc[10:2], each counting how often
+  // the branch there went against its direction (back: taken, forward: not);
+  // from 2 up the guess is turned round. All zero is the static rule, so a
+  // branch never seen (or another one's entry) is guessed as before.
+  // The return stack: the pc of the last eight calls. "jmpl %i7+8, %g0" and
+  // "jmpl %o7+8, %g0" are predicted to return behind the newest (pc + 8),
+  // and E checks the register against that pc. Calls push and returns pop
+  // as they arrive, right or wrong path: a slip costs a wrong guess only.
   logic        pr_ok;
   logic [31:0] pr_target, pr_target4;   // (target + 4 from pc + 4: two adders side by side, not in series)
+  logic [29:0] pr_inf;         // what E needs to check and learn: the call's pc (a return), the counter (a branch)
+  (* ramstyle = "MLAB" *) logic [1:0] bht [512];
+  logic [1:0]  bht_q;
+  logic        bht_we;
+  logic [1:0]  bht_wd;
+  (* ramstyle = "MLAB" *) logic [29:0] ras [8];
+  logic [2:0]  ras_sp;         // the newest entry
+  logic [3:0]  ras_cnt;        // entries that hold a call (0..8)
+  logic [29:0] ras_top;
+  logic        pr_call, pr_ret;   // the arriving instruction is a call / a return
+  assign bht_q   = bht[f_pend_pc[10:2]];
+  assign ras_top = ras[ras_sp];
+  // synthesis translate_off
+  initial for (int i = 0; i < 512; i++) bht[i] = 2'd0;
+  // synthesis translate_on
   always_comb begin
     logic [31:0] inst;
-    logic        bcc, call, back;
+    logic        bcc, call, back, ret;
+    logic [31:0] disp;
     inst = ifetch_rsp_i.inst;
     bcc  = inst[31:30] == 2'b00 && (inst[24:22] == 3'b010 || inst[24:22] == 3'b110);   // Bicc, FBfcc
     call = inst[31:30] == 2'b01;
     back = inst[21];                                                                 // disp22 < 0
-    pr_target  = f_pend_pc + (call ? {inst[29:0], 2'b00} : {{8{inst[21]}}, inst[21:0], 2'b00});
-    pr_target4 = (f_pend_pc + 32'd4) + (call ? {inst[29:0], 2'b00} : {{8{inst[21]}}, inst[21:0], 2'b00});
+    // ret, retl; not to pc + 4 (as for the branches below: the target would have the slot's pc)
+    ret  = (inst == 32'h81C7E008 || inst == 32'h81C3E008) && ras_cnt != 4'd0 &&
+           ras_top != f_pend_pc[31:2] - 30'd1;
+    disp = call ? {inst[29:0], 2'b00} : {{8{inst[21]}}, inst[21:0], 2'b00};
+    pr_target  = ret ? {ras_top + 30'd2, 2'b00} : f_pend_pc + disp;
+    pr_target4 = ret ? {ras_top + 30'd3, 2'b00} : (f_pend_pc + 32'd4) + disp;
+    pr_inf     = ret ? ras_top : {28'd0, bht_q};
     pr_ok = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 &&
-            (call || (bcc && (inst[28:25] == 4'h8 || (inst[28:25] != 4'h0 && back)))) && inst[21:0] != 22'd1 &&
+            (ret || ((call || (bcc && (inst[28:25] == 4'h8 || (inst[28:25] != 4'h0 && (back ^ bht_q[1]))))) &&
+                     inst[21:0] != 22'd1)) &&
             f_pend_npc == f_pend_pc + 32'd4 && f_pc == f_pend_pc + 32'd4 && !redirect && !flush;
+    pr_call = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 &&
+              (call || (inst[31:30] == 2'b10 && inst[24:19] == 6'h38 && inst[29:25] == 5'd15));   // call, jmpl ..., %o7
+    pr_ret  = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 && ret;
+  end
+  always_ff @(posedge clk)             // (no reset in this block: the stack is a RAM)
+    if (pr_call) ras[ras_sp + 3'd1] <= f_pend_pc[31:2];
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      ras_sp <= '0; ras_cnt <= '0;
+    end else if (pr_call) begin
+      ras_sp <= ras_sp + 3'd1;
+      if (ras_cnt != 4'd8) ras_cnt <= ras_cnt + 4'd1;
+    end else if (pr_ret) begin
+      ras_sp <= ras_sp - 3'd1;
+      ras_cnt <= ras_cnt - 4'd1;
+    end
+    if (bht_we) bht[e_pc[10:2]] <= bht_wd;
   end
   logic        f_buf_pred;     // the buffered instruction is a predicted DCTI
+  logic [29:0] f_buf_inf, f_b2_inf, d_inf, e_inf;   // pr_inf, travelling with the instruction
 
   // What D would take this cycle
   logic        take_from_buf;
   logic [31:0] take_inst, take_pc, take_npc;
   logic [1:0]  take_fault;
   logic        take_pred;
+  logic [29:0] take_inf;
   logic        take_avail;
   always_comb begin
     take_from_buf = f_have;
     take_avail = f_have | rsp_valid;
     if (f_have) begin
       take_inst = f_buf_inst; take_pc = f_buf_pc; take_npc = f_buf_npc; take_fault = f_buf_fault;
-      take_pred = f_buf_pred;
+      take_pred = f_buf_pred; take_inf = f_buf_inf;
     end else begin
-      take_pred = pr_ok;
+      take_pred = pr_ok; take_inf = pr_inf;
       take_inst = ifetch_rsp_i.inst; take_pc = f_pend_pc; take_npc = f_pend_npc; take_fault = ifetch_rsp_i.fault;
     end
   end
@@ -247,20 +310,24 @@ module iu
   logic        slot_in_d, slot_arriving, slot_in_buf, slot_pending;
   assign slot_pc       = e_npc;
   assign slot_in_d     = d_valid && d_pc == slot_pc;
-  assign slot_arriving = !slot_in_d && rsp_valid && f_pend_pc == slot_pc;
+  assign slot_arriving = !slot_in_d && !f_have && rsp_valid && f_pend_pc == slot_pc;   // (behind a head it is not the slot)
   assign slot_in_buf   = !slot_in_d && f_have && f_buf_pc == slot_pc;
   assign slot_pending  = !slot_in_d && !slot_in_buf && f_pending && !f_pend_discard && f_pend_pc == slot_pc && !rsp_valid;
 
-  // D takes the instruction unless a redirect drops it (it is behind the slot)
-  assign f_take = take_avail & ~d_stall & ~flush & ~error & ~(redirect & ~(take_pc == slot_pc));
-  assign f_take_buf = f_have & ~d_stall & ~flush & ~error & ~(redirect & ~(f_buf_pc == slot_pc));
+  // D takes the instruction unless a redirect drops it (it is behind the
+  // slot). The slot is known by its pc, but only the first instruction with
+  // that pc behind the DCTI is the slot: a wrong guess can lead back to the
+  // DCTI and its slot (a return guessed to return to itself, a two-
+  // instruction loop), and that second copy is dropped like the rest.
+  assign f_take = take_avail & ~d_stall & ~flush & ~error & ~(redirect & ~(take_pc == slot_pc & ~slot_in_d));
+  assign f_take_buf = f_have & ~d_stall & ~flush & ~error & ~(redirect & ~(f_buf_pc == slot_pc & ~slot_in_d));
   // the arriving response goes to the buffer unless D takes it directly
   // (it does only with the buffer empty)
   assign rsp_to_buf = rsp_valid & (f_have | ~f_take);
   logic [31:0] take_npc_eff;
   logic        take_annul;
   assign take_npc_eff = (redirect && take_pc == slot_pc) ? redirect_target : take_npc;
-  assign take_annul   = f_annul_next | (annul_slot && take_pc == slot_pc) | (take_from_buf & f_buf_annul);
+  assign take_annul   = f_annul_next | (annul_slot && take_pc == slot_pc && !slot_in_d) | (take_from_buf & f_buf_annul);
   // A fetch that faulted enters the pipe and will trap: no more fetches
   // until its trap flushes, so that a second fault on the same page is not
   // recorded over the first (SFSR.OW; Solaris reads OW as "re-probe" and
@@ -277,7 +344,7 @@ module iu
   endfunction
   logic ifault_hold, ifault_live;
   logic d_annul_now;            // (assigned with D below)
-  assign ifault_live = (f_have && f_buf_fault != 2'd0) ||
+  assign ifault_live = (f_have && f_buf_fault != 2'd0) || (f_have2 && f_b2_fault != 2'd0) ||
                        (d_valid && d_trap && is_ifault_tt(d_tt) && !d_annul_now) ||
                        (e_valid && e_trap && is_ifault_tt(e_tt)) ||
                        (m_valid && m_trap && is_ifault_tt(m_tt)) ||
@@ -288,13 +355,14 @@ module iu
     else if (!ifault_live) ifault_hold <= 1'b0;
   end
 
-  // Issue a new fetch when nothing is outstanding (or its response arrives
-  // now) and the buffer is empty: the arriving response then has D or the
-  // buffer, and the new one, if the buffer is still full when it comes,
-  // waits in the module (ready low). Registered state only, apart from
-  // the response's valid, so that the cache's answer and the next request
-  // are a short path.
-  assign can_issue = ~error & ~flush & (~f_pending | ifetch_rsp_i.valid) & ~f_have &
+  // Issue a new fetch when the buffer is empty and nothing is outstanding
+  // (or its response arrives now), or when only the head is taken and
+  // nothing is outstanding: either way the buffer has room for whatever
+  // arrives while D stalls (one outstanding fetch, two entries). Registered
+  // state only, apart from the response's valid, so that the cache's answer
+  // and the next request are a short path.
+  assign can_issue = ~error & ~flush &
+                     (f_have ? (~f_have2 & ~f_pending) : (~f_pending | ifetch_rsp_i.valid)) &
                      ~ifault_hold & ~(rsp_valid & (ifetch_rsp_i.fault != 2'd0));
 
   assign ifetch_req_o.valid = can_issue;
@@ -311,6 +379,8 @@ module iu
       f_pend_discard <= 1'b0;
       f_have <= 1'b0;
       f_buf_inst <= '0; f_buf_pc <= '0; f_buf_npc <= '0; f_buf_fault <= '0; f_buf_pred <= 1'b0;
+      f_have2 <= 1'b0;
+      f_b2_inst <= '0; f_b2_pc <= '0; f_b2_npc <= '0; f_b2_fault <= '0; f_b2_pred <= 1'b0;
       f_annul_next <= 1'b0;
       f_buf_annul <= 1'b0;
       f_slot_pending <= 1'b0;
@@ -326,15 +396,26 @@ module iu
       end else if (rsp_taken) begin
         f_pending <= 1'b0;
       end
-      // the buffer
-      if (f_take && f_have) f_have <= 1'b0;
+      // the buffer: D takes the head and the second entry moves up; the
+      // arriving response goes behind what stays
+      if (f_take_buf) begin
+        f_have <= f_have2;
+        f_buf_inst <= f_b2_inst; f_buf_pc <= f_b2_pc; f_buf_npc <= f_b2_npc;
+        f_buf_fault <= f_b2_fault; f_buf_pred <= f_b2_pred; f_buf_inf <= f_b2_inf;
+        f_buf_annul <= 1'b0;                          // (only a head is ever marked, below)
+        f_have2 <= 1'b0;
+      end
       if (rsp_to_buf) begin
-        f_have <= 1'b1;
-        f_buf_inst <= ifetch_rsp_i.inst;
-        f_buf_pc <= f_pend_pc;
-        f_buf_npc <= f_pend_npc;
-        f_buf_fault <= ifetch_rsp_i.fault;
-        f_buf_pred <= pr_ok;
+        if (f_have && f_take_buf == f_have2) begin    // the head stays, or the second entry becomes it
+          f_have2 <= 1'b1;
+          f_b2_inst <= ifetch_rsp_i.inst; f_b2_pc <= f_pend_pc; f_b2_npc <= f_pend_npc;
+          f_b2_fault <= ifetch_rsp_i.fault; f_b2_pred <= pr_ok; f_b2_inf <= pr_inf;
+        end else begin
+          f_have <= 1'b1;
+          f_buf_inst <= ifetch_rsp_i.inst; f_buf_pc <= f_pend_pc; f_buf_npc <= f_pend_npc;
+          f_buf_fault <= ifetch_rsp_i.fault; f_buf_pred <= pr_ok; f_buf_inf <= pr_inf;
+          f_buf_annul <= 1'b0;                        // marked below if it is the annulled slot
+        end
       end
       // BPRED: the slot is issued with the target as its npc (now), or the
       // target follows it when it is issued (later)
@@ -347,18 +428,21 @@ module iu
           f_npc <= pr_target;
         end
       end
-      if (f_take && f_have) f_buf_annul <= 1'b0;
-      if (rsp_to_buf) f_buf_annul <= 1'b0;          // marked below if it is the annulled slot
       // the annulled-slot marker is consumed by the next instruction into D
       if (f_take) f_annul_next <= 1'b0;
 
       // A taken DCTI in E: the slot keeps its place, its npc becomes the
       // target, and whatever was fetched behind it is dropped, including a
       // fetch issued in this very cycle.
+      // (The slot directly follows the DCTI: it is in D, else the head of
+      // the buffer, else on its way. The second entry is always behind it.)
       if (redirect) begin
         f_pc  <= redirect_target;
         f_npc <= redirect_target + 32'd4;
-        if (can_issue && f_pc != slot_pc) f_pend_discard <= 1'b1;   // issued now, behind the slot
+        f_have2 <= 1'b0;
+        // issued now, behind the slot (also with the slot's pc, when the slot is already somewhere)
+        if (can_issue && (f_pc != slot_pc || slot_in_d || slot_arriving || slot_in_buf || slot_pending))
+          f_pend_discard <= 1'b1;
         if (slot_in_d || slot_arriving) begin
           if (!slot_arriving && f_pending && !rsp_taken) f_pend_discard <= 1'b1;
           if (!(slot_arriving && rsp_to_buf)) f_have <= 1'b0;
@@ -366,7 +450,7 @@ module iu
           f_buf_npc <= redirect_target;
           f_buf_pred <= 1'b0;                        // (what it predicted is dropped with the rest)
           if (f_pending && !rsp_taken) f_pend_discard <= 1'b1;
-          if (f_take_buf) f_have <= 1'b0;            // the slot goes to D; a response arriving is behind it
+          f_have <= !f_take_buf;                     // the slot stays, or goes to D; whatever arrives is behind it
         end else if (slot_pending) begin
           f_pend_npc <= redirect_target;
         end else if (can_issue && f_pc == slot_pc) begin
@@ -392,6 +476,7 @@ module iu
         f_npc <= {tba, tt_next, 4'b0000} + 32'd4;
         if (f_pending) f_pend_discard <= 1'b1;
         f_have <= 1'b0;
+        f_have2 <= 1'b0;
         f_annul_next <= 1'b0;
         f_buf_annul <= 1'b0;
       end
@@ -459,7 +544,10 @@ module iu
     if (ld.rd != 5'd0) begin
       if (d_dec.rs1 == ld.rd) u = 1'b1;
       if (!d_dec.imm && d_dec.rs2 == ld.rd) u = 1'b1;
-      if ((d_dec.cls == C_STORE || d_dec.cls == C_ATOMIC) && d_dec.rd == ld.rd) u = 1'b1;
+      // (a store of the word a plain load just read does not wait: its
+      // data is taken from W when the store is in M, m_wd_late)
+      if ((d_dec.cls == C_STORE || d_dec.cls == C_ATOMIC) && d_dec.rd == ld.rd &&
+          !(d_dec.cls == C_STORE && d_dec.size != 2'd3 && ld.cls == C_LOAD && !dbl)) u = 1'b1;
       if (d_dec.cls == C_STORE && d_dec.size == 2'd3 && {d_dec.rd[4:1], 1'b1} == ld.rd) u = 1'b1;
       if (dbl && {ld.rd[4:1], 1'b1} == d_dec.rs1) u = 1'b1;
       if (dbl && !d_dec.imm && {ld.rd[4:1], 1'b1} == d_dec.rs2) u = 1'b1;
@@ -516,6 +604,7 @@ module iu
         d_pc <= take_pc;
         d_npc <= take_npc_eff;
         d_pred <= take_pred && !(redirect && take_pc == slot_pc);
+        d_inf <= take_inf;
         d_annulled <= take_annul;
         // trap tags that come with the fetch, or the interrupt
         d_trap <= 1'b0;
@@ -564,6 +653,7 @@ module iu
       e_pc <= d_pc;
       e_npc <= (slot_in_d && redirect) ? redirect_target : d_npc;
       e_pred <= d_pred && !(slot_in_d && redirect);
+      e_inf <= d_inf;
       // the RF output is a cycle old: a write landing at this edge is taken here
       e_rs1 <= (rf_we && rf_rd == d_dec.rs1) ? rf_wdata : rf_q1;
       e_rs2 <= (rf_we && rf_rd == d_dec.rs2) ? rf_wdata : rf_q2;
@@ -623,6 +713,7 @@ module iu
   endfunction
 
   logic [31:0] w_rdval;        // what W writes to rd (first cycle)
+  logic [31:0] w_ldval;        // W's load value, extended
 
   // The immediates, from the instruction word held in E (iu_decode's
   // fields of the same name are not carried into E: 87 flops a CPU)
@@ -856,8 +947,21 @@ module iu
   assign e_ctl_now = e_valid && !e_resolved && !e_trap && !e_tag_trap;
   // (a predicted DCTI that is not taken, or annulled -- a NOP here --
   // continues after its slot)
-  assign redirect        = e_ctl_now && (e_pred ? !e_taken : e_taken);
-  assign redirect_target = e_pred ? e_pc_disp : e_target;
+  // A predicted return (the only JMPL that is): right when the register is
+  // the call's pc the guess was made from (the adder is not waited for)
+  logic e_ret_pred, e_ret_ok;
+  assign e_ret_pred = e_pred && e_dec.cls == C_JMPL;
+  assign e_ret_ok   = a == {e_inf, 2'b00};
+  assign redirect        = e_ctl_now && (e_ret_pred ? !e_ret_ok : e_pred ? !e_taken : e_taken);
+  assign redirect_target = (e_pred && !e_ret_pred) ? e_pc_disp : e_target;
+  // The history learns from every conditional branch E resolves
+  always_comb begin
+    logic against;
+    against = e_taken != e_inst[21];
+    bht_we  = BPRED && e_ctl_now && (e_dec.cls == C_BICC || e_dec.cls == C_FBFCC) && e_dec.cond[2:0] != 3'd0;
+    bht_wd  = against ? ((e_inf[1:0] == 2'd3) ? 2'd3 : e_inf[1:0] + 2'd1)
+                      : ((e_inf[1:0] == 2'd0) ? 2'd0 : e_inf[1:0] - 2'd1);
+  end
   assign annul_slot      = e_ctl_now && e_annul;
 
   assign e_go    = e_valid && !m_stall && !md_wait;
@@ -878,7 +982,12 @@ module iu
       m_valid <= 1'b0;
       m_dec <= '0; m_trap <= 1'b0; m_tt <= '0;          // (the data as in E)
       m_icc <= '0; m_wicc <= 1'b0; m_wy <= 1'b0; m_newcwp <= '0;
+      m_wd_late <= 1'b0;
     end else if (e_go) begin
+      // the load ahead leaves M at this edge with its data still on the
+      // cache's answer (not in m_rdata): the store reads it from W
+      m_wd_late <= e_dec.cls == C_STORE && e_dec.size != 2'd3 && e_dec.rd != 5'd0 &&
+                   m_valid && !m_trap && m_dec.cls == C_LOAD && m_dec.size != 2'd3 && m_dec.rd == e_dec.rd && !m_acked;
       m_valid <= 1'b1;
       m_dec <= e_dec;
       m_inst <= e_inst;
@@ -922,7 +1031,8 @@ module iu
     dmem_req_o.asi    = m_dec.alt ? m_dec.asi : (s ? ASI_SUPV_DATA : ASI_USER_DATA);
     dmem_req_o.va     = m_result;
     dmem_req_o.size   = m_dec.size;
-    dmem_req_o.wdata  = (m_dec.cls == C_ATOMIC && !m_dec.swap) ? 64'h0000_0000_0000_00FF : m_wdata;
+    dmem_req_o.wdata  = (m_dec.cls == C_ATOMIC && !m_dec.swap) ? 64'h0000_0000_0000_00FF :
+                        m_wd_late ? {32'd0, w_ldval} : m_wdata;
   end
 
   // An access is issued once; the response may come later
@@ -988,7 +1098,6 @@ module iu
   // W: write-back and traps
   // =====================================================================
   // The load value, extended
-  logic [31:0] w_ldval;
   assign w_ldval = ld_extend(w_dec.size, w_dec.sgn, w_rdata);
   assign w_rdval = (w_dec.cls == C_LOAD || w_dec.cls == C_ATOMIC) ? w_ldval : w_result;
 
@@ -1073,6 +1182,10 @@ module iu
 
 `ifndef SYNTHESIS
   // synthesis translate_off
+  // the delay slot is never the buffer's second entry (see F)
+  always_ff @(posedge clk)
+    if (!rst && (redirect || annul_slot) && f_have2 && f_b2_pc == slot_pc && !slot_in_d && !slot_in_buf)
+      $error("iu: the delay slot is in the fetch buffer's second entry");
   // +ctrace_from=N +ctrace_to=M (IU clock cycles): every instruction leaving
   // W (or trapping there), with the register it writes, ICC and Y
   longint ct_cyc, ct_from, ct_to;
@@ -1143,6 +1256,7 @@ module iu
   longint      pf_period;
   longint      pi_ok, pi_es, pi_md, pi_lu, pi_sr, pi_fp, pi_fr, pi_fo, pi_ot;
   int          pi_rd;
+  longint      qpr_ret, qpr_jmp, qpr_fwd, qpr_mis, qpr_call, pe_ld, pe_st;   // redirects by kind; E held by M's load / store
   longint      pf_cyc, pf_cu, pf_cs, pf_w2, pf_ld, pf_st, pf_md, pf_fp, pf_hz, pf_fe, pf_ot, pf_br, pf_tr;
   initial begin
     perf_on = $test$plusargs("perf");
@@ -1150,6 +1264,7 @@ module iu
     pf_cyc = 0; pf_cu = 0; pf_cs = 0; pf_w2 = 0; pf_ld = 0; pf_st = 0; pf_md = 0; pf_fp = 0;
     pf_hz = 0; pf_fe = 0; pf_ot = 0; pf_br = 0; pf_tr = 0;
     pi_ok = 0; pi_es = 0; pi_md = 0; pi_lu = 0; pi_sr = 0; pi_fp = 0; pi_fr = 0; pi_fo = 0; pi_ot = 0; pi_rd = 0;
+    qpr_ret = 0; qpr_jmp = 0; qpr_fwd = 0; qpr_mis = 0; qpr_call = 0; pe_ld = 0; pe_st = 0;
   end
   /* verilator lint_off BLKSEQ */
   always_ff @(posedge clk) begin
@@ -1166,6 +1281,16 @@ module iu
       if (redirect && e_go) pf_br = pf_br + 1;
       // the issue slot (D to E): taken, or lost and why
       if (redirect) pi_rd = 3; else if (pi_rd != 0) pi_rd = pi_rd - 1;
+      if (redirect) begin
+        if (e_pred)                                             qpr_mis = qpr_mis + 1;
+        else if (e_dec.cls == C_JMPL && e_dec.rd == 5'd0)       qpr_ret = qpr_ret + 1;
+        else if (e_dec.cls == C_JMPL || e_dec.cls == C_RETT)    qpr_jmp = qpr_jmp + 1;
+        else if (e_dec.cls == C_CALL)                           qpr_call = qpr_call + 1;
+        else                                                    qpr_fwd = qpr_fwd + 1;
+      end
+      if (d_valid && e_stall && !md_wait) begin
+        if (m_dec.cls == C_LOAD || m_dec.cls == C_FPLOAD) pe_ld = pe_ld + 1; else pe_st = pe_st + 1;
+      end
       if (d_go)                                      pi_ok = pi_ok + 1;
       else if (d_valid && e_stall)                   begin if (md_wait) pi_md = pi_md + 1; else pi_es = pi_es + 1; end
       else if (d_valid && d_hazard && d_uses_rd_of_e) pi_lu = pi_lu + 1;
@@ -1183,6 +1308,9 @@ module iu
         $display("pissue %m: ok %0d | E held %0d muldiv %0d | load-use %0d | serialising %0d | fp %0d | fetch after redirect %0d | fetch other %0d | other %0d",
                  pi_ok, pi_es, pi_md, pi_lu, pi_sr, pi_fp, pi_fr, pi_fo, pi_ot);
         pi_ok = 0; pi_es = 0; pi_md = 0; pi_lu = 0; pi_sr = 0; pi_fp = 0; pi_fr = 0; pi_fo = 0; pi_ot = 0;
+        $display("predir %m: return %0d | jmpl %0d | not predicted %0d | mispredicted %0d | call %0d | E held by a load %0d, a store %0d",
+                 qpr_ret, qpr_jmp, qpr_fwd, qpr_mis, qpr_call, pe_ld, pe_st);
+        qpr_ret = 0; qpr_jmp = 0; qpr_fwd = 0; qpr_mis = 0; qpr_call = 0; pe_ld = 0; pe_st = 0;
       end
     end
   end

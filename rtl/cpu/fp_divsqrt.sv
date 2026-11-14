@@ -51,7 +51,9 @@ module fp_divsqrt
   // One step of either recurrence: sqrt, two radicand bits down minus
   // (4q + 1); divide, 2 rem - 2b (rem doubled, above). Two steps a cycle,
   // the second on the first one's remainder and quotient.
+  /* verilator lint_off UNUSEDSIGNAL */   // r1[61] (the second step shifts it out)
   logic [61:0] t1, s1, r1, t2, s2, r2;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic [57:0] q1, q2;
   always_comb begin
     t1 = is_sqrt ? {rem[59:0], rad[115:114]} : {rem[60:0], 1'b0};

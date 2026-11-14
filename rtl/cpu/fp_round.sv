@@ -37,6 +37,7 @@ module fp_round
   input  logic        uf_trap_i,     // TEM.UF: tiny alone raises UF
   input  logic        hold_i,        // keep the stage register (denormalise it), do not load
   output logic        busy_o,        // hold_i: the denormalisation is not over
+  output logic        tiny_o,        // the stage holds a tiny value (busy_o can only rise with it: a register)
   output logic [63:0] bits_o,        // the single in [63:32]
   output logic [4:0]  flags_o        // NV OF UF DZ NX (NV, DZ are the caller's)
 );
@@ -99,6 +100,7 @@ module fp_round
   logic        dn_step;
   assign dn_step = tiny && en < emin && mn != '0;
   assign busy_o  = dn_step;
+  assign tiny_o  = tiny;
   always_ff @(posedge clk) begin
     if (!hold_i) begin
       mn <= mn1; en <= en1; is_zero <= is_zero1; tiny <= tiny1;

@@ -108,11 +108,17 @@ module fpu
 
   typedef enum logic [2:0] {S_IDLE, S_NORM, S_START, S_WAIT, S_ROUND, S_DONE} exstate_t;
   exstate_t ex;
+  // The next FPop may be taken in the cycle the current one's result is
+  // final (the last of S_ROUND) when that result cannot trap (no trap
+  // enabled in the FSR: the usual case) and the next FPop does not read the
+  // register being written (its write is next cycle; then it is taken from
+  // S_IDLE, through the read bypass)
+  logic round_free;
 
   always_comb begin
     rsp_o = '0;
     rsp_o.busy        = (ex != S_IDLE) | dp_wr;
-    rsp_o.op_busy     = ex != S_IDLE;
+    rsp_o.op_busy     = ex != S_IDLE && !round_free;
     rsp_o.exc_pending = state == FP_PENDING;
     rsp_o.exc_state   = state == FP_EXCEPTION;
     rsp_o.rd_data     = rf_rd[0];
@@ -179,7 +185,11 @@ module fpu
   logic [63:0] a_bits, b_bits, a_pair, b_pair;
   logic        idle, o_dbl, o_a_odd, o_b_odd;
   logic [4:0]  o_rs1, o_rs2;
-  assign idle    = ex == S_IDLE;
+  // (idle: also S_ROUND, in whose last cycle the next FPop may be taken;
+  // the current one's operands are no longer read there. The state alone,
+  // not round_last: that hangs off the rounder, which the operand patterns
+  // feed)
+  assign idle    = ex == S_IDLE || ex == S_ROUND;
   assign o_rs1   = idle ? req_i.fpop_inst[18:14] : c_inst[18:14];
   assign o_rs2   = idle ? req_i.fpop_inst[4:0] : c_inst[4:0];
   assign o_dbl   = idle ? src_dbl : c_src_dbl;
@@ -244,14 +254,13 @@ module fpu
   // Rounder
   logic [63:0] rnd_bits;
   logic [4:0]  rnd_flags;
-  fp_wide_t    wide_q;
   logic [63:0] res_bits_q;
   logic [4:0]  res_flags_q;
   logic        res_direct_q, res_is_cmp_q;
   logic [1:0]  res_fcc_q;
-  logic     rnd_busy;
-  fp_round u_round (.clk, .v_i(wide_q), .dbl_i(c_dst_dbl), .rd_i(fsr_rd), .uf_trap_i(fsr_tem[FX_UF]),
-                    .hold_i(ex == S_ROUND), .busy_o(rnd_busy),
+  logic     rnd_busy, rnd_tiny;
+  fp_round u_round (.clk, .v_i(wide), .dbl_i(c_dst_dbl), .rd_i(fsr_rd), .uf_trap_i(fsr_tem[FX_UF]),
+                    .hold_i(ex == S_ROUND), .busy_o(rnd_busy), .tiny_o(rnd_tiny),
                     .bits_o(rnd_bits), .flags_o(rnd_flags));
 
   // Divide / square root
@@ -349,7 +358,11 @@ module fpu
   end
 
   // Integer conversions
-  logic [31:0] itof_abs;
+  logic [31:0] itof_abs, itof_abs_q;
+  logic        itof_sign_q;
+  // (registered: the pattern is read from the register file, and the
+  // rounder's normalisation follows in the same cycle otherwise)
+  always_ff @(posedge clk) begin itof_abs_q <= itof_abs; itof_sign_q <= c_b_bits[63]; end
   logic [31:0] ftoi_iv;
   logic        ftoi_inexact;
   always_comb begin
@@ -386,8 +399,8 @@ module fpu
       O_DIV, O_SQRT: wide = ds_r;
       O_ITOF: begin
         // the 32-bit integer in b_bits[63:32]: value = |i| * 2^(55 - 55)
-        wide.sign   = c_b_bits[63];
-        wide.man    = 58'(itof_abs);
+        wide.sign   = itof_sign_q;
+        wide.man    = 58'(itof_abs_q);
         wide.exp    = 14'sd55;
         wide.sticky = 1'b0;
       end
@@ -559,7 +572,6 @@ module fpu
 
   // The per-op result, registered (the rounder's first stage follows)
   always_ff @(posedge clk) begin
-    wide_q <= wide;
     res_bits_q <= res_bits; res_flags_q <= res_flags; res_direct_q <= res_direct;
     res_fcc_q <= res_fcc; res_is_cmp_q <= res_is_cmp;
   end
@@ -572,12 +584,36 @@ module fpu
   logic [4:0]  f_flags;
   assign f_bits  = res_direct_q ? res_bits_q : rnd_bits;
   assign f_flags = res_direct_q ? res_flags_q : (rnd_flags | res_flags_q);
-  assign dp_wr_addr = c_rd;
-  assign dp_wr_dbl  = c_dst_dbl;
+  // (fin_rd/fin_dbl, not c_rd/c_dst_dbl: the next FPop may be latched in
+  // the cycle the result is, see round_free)
+  logic [4:0]  fin_rd;
+  logic        fin_dbl;
+  assign dp_wr_addr = fin_rd;
+  assign dp_wr_dbl  = fin_dbl;
   assign dp_wr_data = fin_bits;
   assign fq         = {c_pc, c_inst};
   logic [1:0]  wait_cnt;
   logic        ds_ok;                  // the divide/square-root unit finished
+  // The cycles of S_WAIT after the first, by what lies between the latched
+  // operands and the rounder's stage register (or res_*_q):
+  //   add/sub   align | add | (normalise)          2
+  //   compare   align | add | (fcc)                2
+  //   multiply  product | (normalise)              1
+  //   F?TOi     align | (integer)                  1
+  //   FiTO?     magnitude | (normalise)            1
+  //   the rest  (normalise) or (the direct result) 0
+  function automatic logic [1:0] wait_of(input fop_t o);
+    case (o)
+      O_ADD, O_SUB, O_CMP, O_CMPE: return 2'd2;
+      O_MUL, O_FTOI, O_ITOF:       return 2'd1;
+      default:                     return 2'd0;
+    endcase
+  endfunction
+  logic        next_reads_rd;          // the FPop offered reads the pair being written
+  assign next_reads_rd = o_rs2[4:1] == c_rd[4:1] || o_rs1[4:1] == c_rd[4:1];
+  // (not tiny: S_ROUND is then one cycle; registers only, this goes to the IU's stall)
+  assign round_free    = ex == S_ROUND && (res_direct_q || !rnd_tiny) &&
+                         fsr_tem == 5'd0 && state == FP_EXECUTE && !next_reads_rd;
 
   always_ff @(posedge clk) begin
     dp_wr <= 1'b0;
@@ -590,7 +626,7 @@ module fpu
       c_op <= O_UNIMPL; c_src_dbl <= 1'b0; c_dst_dbl <= 1'b0; c_rd <= '0; c_inst <= '0; c_pc <= '0;
       c_a <= '0; c_b <= '0; c_two <= 1'b0;
       wait_cnt <= '0; ds_ok <= 1'b0;
-      fin_bits <= '0;
+      fin_bits <= '0; fin_rd <= '0; fin_dbl <= 1'b0;
     end else begin
       // ldfsr: everything but ver, ftt, qne and the reserved bits
       if (req_i.fsr_wr) begin
@@ -612,23 +648,7 @@ module fpu
       end
 
       case (ex)
-        S_IDLE: begin
-          if (req_i.fpop_valid) begin
-            c_op <= op; c_src_dbl <= src_dbl; c_dst_dbl <= dst_dbl; c_rd <= rd;
-            c_inst <= req_i.fpop_inst; c_pc <= req_i.fpop_pc;
-            c_b <= u_v;
-            c_a <= u_va;
-            c_two <= two_op;
-            // The usual case goes straight to the datapath's wait: S_START
-            // only starts the divide/square-root unit, reports an
-            // unimplemented FPop, or follows S_NORM
-            ds_ok <= 1'b0;
-            wait_cnt <= (op == O_ADD || op == O_SUB) ? 2'd3 : 2'd2;   // (the adder's path is a register longer)
-            if (denorm(u_v) || (two_op && denorm(u_va))) ex <= S_NORM;
-            else if (op == O_DIV || op == O_SQRT || op == O_UNIMPL) ex <= S_START;
-            else ex <= S_WAIT;
-          end
-        end
+        S_IDLE: ;                       // (an FPop is taken below)
         S_NORM: begin
           if (c_two && denorm(c_a)) begin
             c_a.man <= {c_a.man[51:0], 1'b0}; c_a.exp <= c_a.exp - 14'sd1;
@@ -647,7 +667,7 @@ module fpu
             ds_start <= 1'b1;
             ex <= S_WAIT;
           end else begin
-            wait_cnt <= 2'd2;              // align/add/select/normalise, the multiplier's two registers
+            wait_cnt <= wait_of(c_op);
             ex <= S_WAIT;
           end
         end
@@ -657,7 +677,7 @@ module fpu
           // A divide or square root waits for its unit, then for the
           // result select and normalise registers.
           if ((c_op == O_DIV || c_op == O_SQRT) && !res_direct && !ds_ok) begin
-            if (ds_done) begin ds_ok <= 1'b1; wait_cnt <= 2'd1; end
+            if (ds_done) begin ds_ok <= 1'b1; wait_cnt <= 2'd0; end
           end else if (wait_cnt != '0) begin
             wait_cnt <= wait_cnt - 2'd1;
           end else begin
@@ -670,7 +690,7 @@ module fpu
           // cycle
           if (res_direct_q || !rnd_busy) begin
             ex <= S_IDLE;
-            fin_bits <= f_bits;
+            fin_bits <= f_bits; fin_rd <= c_rd; fin_dbl <= c_dst_dbl;
             if ((f_flags & fsr_tem) != 5'd0) begin
               fsr_ftt <= FTT_IEEE;
               fsr_cexc <= f_flags;
@@ -694,6 +714,28 @@ module fpu
         end
         default: ex <= S_IDLE;
       endcase
+
+      // An FPop is taken: from S_IDLE, or in S_ROUND's last cycle
+      // (round_free; the IU offers one only with op_busy low)
+      if (req_i.fpop_valid) begin
+        c_op <= op; c_src_dbl <= src_dbl; c_dst_dbl <= dst_dbl; c_rd <= rd;
+        c_inst <= req_i.fpop_inst; c_pc <= req_i.fpop_pc;
+        c_b <= u_v;
+        c_a <= u_va;
+        c_two <= two_op;
+        // The usual case goes straight to the datapath's wait: S_START
+        // only starts the divide/square-root unit, reports an
+        // unimplemented FPop, or follows S_NORM
+        ds_ok <= 1'b0;
+        wait_cnt <= wait_of(op);
+        if (denorm(u_v) || (two_op && denorm(u_va))) ex <= S_NORM;
+        else if (op == O_DIV || op == O_SQRT || op == O_UNIMPL) ex <= S_START;
+        else ex <= S_WAIT;
+      end
+`ifndef SYNTHESIS
+      if (req_i.fpop_valid && !(ex == S_IDLE || round_free))
+        $error("fpu: an FPop was offered while the unit was busy (ex %0d)", ex);
+`endif
     end
   end
 
