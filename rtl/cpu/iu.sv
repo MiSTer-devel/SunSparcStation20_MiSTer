@@ -997,10 +997,14 @@ module iu
   // FP_OVERLAP: an FPop or FP load waits in W while the FPU is busy (one
   // datapath, one register write port); with an exception pending it
   // becomes the fp_exception trap (below), as it would have in E
+  // (an FPop is handed over as the previous one's result lands, op_busy;
+  // an FP load needs the register write port, busy)
+  logic w_fp_busy;
+  assign w_fp_busy = (w_dec.cls == C_FPOP) ? fpu_rsp_i.op_busy : fpu_rsp_i.busy;
   assign w_fp_hold = HAS_FPU && FP_OVERLAP && w_valid && !w_trap &&
                      (w_dec.cls == C_FPOP || (w_dec.cls == C_FPLOAD && !w_dec.fsr)) &&
-                     (fpu_rsp_i.busy || fpu_rsp_i.exc_pending);
-  assign w_fp_cvt  = w_fp_hold && !fpu_rsp_i.busy;
+                     (w_fp_busy || fpu_rsp_i.exc_pending);
+  assign w_fp_cvt  = w_fp_hold && !w_fp_busy;
   assign w_stall = (w_two_cycles && !w_second) || w_fp_hold;
 
   always_ff @(posedge clk) begin

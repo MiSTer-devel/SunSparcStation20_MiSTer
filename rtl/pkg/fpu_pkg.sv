@@ -119,6 +119,8 @@ package fpu_pkg;
 
   typedef struct packed {
     logic        busy;           // an FPop executes (or its result lands): hold FP instructions
+    logic        op_busy;        // an FPop executes: hold the next FPop (it may be handed over in the
+                                 // cycle the result lands: the FPU forwards the result to its operands)
     logic        exc_pending;    // fp_exception_pending: the next FP instruction traps
     logic        exc_state;      // fp_exception: only FP stores may run
     logic [63:0] rd_data;        // the pair at rd_addr[4:1]

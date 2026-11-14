@@ -142,6 +142,30 @@ module tb_fpu
     end
     $display("vectors: %0d", total);
 
+    // ---- back to back: an FPop taken in the cycle the previous result lands
+    // (op_busy low, busy still high) reads that result as its operand ----
+    wr_fsr(32'h0);
+    wr_reg(5'd0, 1'b1, 64'h3FF8_0000_0000_0000);          // 1.5
+    wr_reg(5'd2, 1'b1, 64'h4004_0000_0000_0000);          // 2.5
+    wr_reg(5'd4, 1'b1, 64'h0);
+    @(negedge clk); req = '0; req.fpop_valid = 1'b1; req.fpop_inst = enc(0, 5'd4, 5'd0, 9'h042, 5'd2);   // faddd %f0, %f2, %f4 = 4.0
+    @(negedge clk); req = '0;
+    while (rsp.op_busy) @(negedge clk);
+    check(rsp.busy, "back to back: the result is landing");
+    req.fpop_valid = 1'b1; req.fpop_inst = enc(0, 5'd6, 5'd4, 9'h04A, 5'd4);                         // fmuld %f4, %f4, %f6 = 16.0
+    @(negedge clk); req = '0;
+    while (rsp.op_busy) @(negedge clk);
+    req.fpop_valid = 1'b1; req.fpop_inst = enc(0, 5'd9, 5'd0, 9'h0C6, 5'd6);                         // fdtos %f6, %f9 (the odd half)
+    @(negedge clk); req = '0;
+    while (rsp.op_busy) @(negedge clk);
+    req.fpop_valid = 1'b1; req.fpop_inst = enc(0, 5'd8, 5'd9, 9'h041, 5'd9);                         // fadds %f9, %f9, %f8 = 32.0
+    @(negedge clk); req = '0;
+    while (rsp.busy) @(negedge clk);
+    rd_pair(5'd6, got);
+    check(got == 64'h4030_0000_0000_0000, "back to back: fmuld of the landing faddd = 16.0");
+    rd_pair(5'd8, got);
+    check(got == 64'h4200_0000_4180_0000, "back to back: fadds of the landing fdtos = {32.0, 16.0}");
+
     // ---- the state machine ----
     // A trapped exception: TEM.DZ, 1/0: no result, ftt 1, cexc DZ, the FQ
     // holds the op, exc_pending; then the trap: exc_state; stdfq ends it.

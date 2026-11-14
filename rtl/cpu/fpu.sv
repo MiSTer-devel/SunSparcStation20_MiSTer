@@ -112,6 +112,7 @@ module fpu
   always_comb begin
     rsp_o = '0;
     rsp_o.busy        = (ex != S_IDLE) | dp_wr;
+    rsp_o.op_busy     = ex != S_IDLE;
     rsp_o.exc_pending = state == FP_PENDING;
     rsp_o.exc_state   = state == FP_EXCEPTION;
     rsp_o.rd_data     = rf_rd[0];
@@ -187,8 +188,17 @@ module fpu
   assign rf_ra[0] = req_i.rd_addr[4:1];
   assign rf_ra[1] = o_rs1[4:1];
   assign rf_ra[2] = o_rs2[4:1];
-  assign a_pair = rf_rd[1];
-  assign b_pair = rf_rd[2];
+  // A register being written in this cycle is read as its new value (the
+  // MLAB returns the old one): an FPop may be taken in the cycle the
+  // previous one's result lands (rsp_o.op_busy)
+  always_comb begin
+    a_pair = rf_rd[1];
+    b_pair = rf_rd[2];
+    if (rf_we_hi && rf_wa == rf_ra[1]) a_pair[63:32] = rf_wd_hi;
+    if (rf_we_lo && rf_wa == rf_ra[1]) a_pair[31:0]  = rf_wd_lo;
+    if (rf_we_hi && rf_wa == rf_ra[2]) b_pair[63:32] = rf_wd_hi;
+    if (rf_we_lo && rf_wa == rf_ra[2]) b_pair[31:0]  = rf_wd_lo;
+  end
   always_comb begin
     a_bits = o_dbl ? a_pair : (o_a_odd ? {a_pair[31:0], 32'd0} : {a_pair[63:32], 32'd0});
     b_bits = o_dbl ? b_pair : (o_b_odd ? {b_pair[31:0], 32'd0} : {b_pair[63:32], 32'd0});
@@ -609,7 +619,14 @@ module fpu
             c_b <= u_v;
             c_a <= u_va;
             c_two <= two_op;
-            ex <= (denorm(u_v) || (two_op && denorm(u_va))) ? S_NORM : S_START;
+            // The usual case goes straight to the datapath's wait: S_START
+            // only starts the divide/square-root unit, reports an
+            // unimplemented FPop, or follows S_NORM
+            ds_ok <= 1'b0;
+            wait_cnt <= (op == O_ADD || op == O_SUB) ? 2'd3 : 2'd2;   // (the adder's path is a register longer)
+            if (denorm(u_v) || (two_op && denorm(u_va))) ex <= S_NORM;
+            else if (op == O_DIV || op == O_SQRT || op == O_UNIMPL) ex <= S_START;
+            else ex <= S_WAIT;
           end
         end
         S_NORM: begin
