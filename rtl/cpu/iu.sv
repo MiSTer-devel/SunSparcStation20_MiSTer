@@ -53,12 +53,14 @@ module iu
   // hit: one cycle less a load or store), taking the data and fault from
   // the answer itself; else from the next cycle, from registers
   parameter bit FAST_ACK = 1'b1,
-  // BPRED: BA/FBA and CALL are predicted taken as they arrive from the
-  // cache (the fetch after their delay slot is their target); a conditional
-  // Bicc/FBfcc by its direction (back: taken) unless its history says the
-  // direction is usually wrong; "ret" and "retl" go to the address after
-  // the last call's (a small return stack). E redirects only when the guess
-  // was wrong
+  // BPRED: a control transfer E has seen taken before is predicted as its
+  // word arrives from the cache, from a target buffer read with the fetch
+  // address (not from the word): BA/FBA and CALL to their target, a
+  // conditional Bicc/FBfcc by its direction (back: taken) unless its
+  // history says the direction is usually wrong, "ret" and "retl" to the
+  // address after the last call's (a small return stack). The fetch after
+  // the delay slot is then the target; E checks every guess and redirects
+  // when it was wrong
   parameter bit BPRED = 1'b1,
   // FP_OVERLAP: an FPop or FP load does not wait in D for the FP work ahead;
   // it waits in W, where it meets the FPU, until the FPU is idle (and takes
@@ -212,26 +214,55 @@ module iu
   assign rsp_taken = ifetch_rsp_i.valid & rsp_ready;
   assign rsp_valid = ifetch_rsp_i.valid & f_pending & ~f_pend_discard & (~f_have2 | f_take_buf);
 
-  // BPRED: the instruction arriving now, if a DCTI predicted taken whose
-  // delay slot has not been issued before this cycle (it is issued now, or
-  // later): the fetch after the slot is its target. Not for a DCTI in a
-  // delay slot (npc != pc + 4) nor while a redirect or trap changes the
-  // stream this very cycle. Nor for a target of pc + 4 (NetBSD's locore has
-  // "ba,a .+4; wr %tbr"): the slot and the target would have the same pc,
-  // the slot is known by its pc, and annulling the slot annulled the target.
-  // (Bits 21:0 only, for CALL too: a call that loses its guess is harmless.)
+  // BPRED: the instruction arriving now is predicted taken when the target
+  // buffer holds its pc, its delay slot has not been issued before this
+  // cycle (it is issued now, or later: the fetch after the slot is then the
+  // target), it is not itself in a delay slot (npc != pc + 4), and no
+  // redirect or trap changes the stream this very cycle. Never to pc + 4
+  // (NetBSD's locore has "ba,a .+4; wr %tbr"): the slot and the target
+  // would have the same pc, and the slot is known by its pc.
   //
+  // The target buffer: 1024 entries by pc[11:2], written by E (a cycle
+  // later, from registers) for every taken Bicc/FBfcc/CALL and "ret"/"retl"
+  // it had not predicted or had predicted elsewhere: the kind, the target
+  // and target + 4. Nothing of the arriving word is looked at here, so the
+  // cache's answer no longer runs through a decode and an adder into
+  // f_pc/f_npc (the longest path once the data side's was shortened); the
+  // price is a redirect the first time a transfer is taken. An entry may be
+  // another instruction's (the tag is pc[19:12] only) or out of date: E
+  // checks the guess against the instruction it actually has (e_pred), and
+  // drops an entry that named something not a control transfer.
   // The history: 512 two-bit counters by pc[10:2], each counting how often
   // the branch there went against its direction (back: taken, forward: not);
-  // from 2 up the guess is turned round. All zero is the static rule, so a
-  // branch never seen (or another one's entry) is guessed as before.
-  // The return stack: the pc of the last eight calls. "jmpl %i7+8, %g0" and
-  // "jmpl %o7+8, %g0" are predicted to return behind the newest (pc + 8),
-  // and E checks the register against that pc. Calls push and returns pop
-  // as they arrive, right or wrong path: a slip costs a wrong guess only.
+  // from 2 up the guess is turned round.
+  // The return stack: the pc of the last eight calls; a return is predicted
+  // to pc + 8 of the newest, and E checks the register against that pc.
+  // Predicted calls and returns push and pop as they arrive, the others as
+  // they enter D; right or wrong path: a slip costs a wrong guess only.
+  localparam logic [1:0] K_BR = 2'd0, K_JUMP = 2'd1, K_RET = 2'd2;
+  typedef struct packed {
+    logic        v;
+    logic [7:0]  tag;          // pc[19:12]
+    logic [1:0]  kind;
+    logic        push;         // a CALL: its pc goes on the return stack
+    logic        back;         // (K_BR) the displacement is negative
+    logic [29:0] tgt, tgt4;    // the target and target + 4, in words
+  } btb_t;
+  localparam int BTW = $bits(btb_t);
+  (* ramstyle = "no_rw_check" *) logic [BTW-1:0] btb [1024];
+  logic [BTW-1:0] bt_raw, bt_hold;
+  btb_t        bt;
+  logic        bt_fresh;       // bt_raw is the entry of f_pend_pc (the fetch was issued last cycle)
+  logic        bw_v, bw_inval; // E's update, registered
+  logic [19:2] bw_pc;
+  logic [1:0]  bw_kind;
+  logic        bw_push, bw_back;
+  logic [29:0] bw_tgt;
+  btb_t        bw_ent;
   logic        pr_ok;
-  logic [31:0] pr_target, pr_target4;   // (target + 4 from pc + 4: two adders side by side, not in series)
-  logic [29:0] pr_inf;         // what E needs to check and learn: the call's pc (a return), the counter (a branch)
+  logic [31:0] pr_target, pr_target4;
+  logic [32:0] pr_inf;         // what E needs to check and learn: {a return?, the counter, the predicted target
+                               // (a return: the call's pc)}
   (* ramstyle = "MLAB" *) logic [1:0] bht [512];
   logic [1:0]  bht_q;
   logic        bht_we;
@@ -240,67 +271,71 @@ module iu
   logic [2:0]  ras_sp;         // the newest entry
   logic [3:0]  ras_cnt;        // entries that hold a call (0..8)
   logic [29:0] ras_top;
-  logic        pr_call, pr_ret;   // the arriving instruction is a call / a return
+  logic        ras_ok;         // the top may be used
+  logic        pr_push, pr_pop;   // the arriving instruction is a predicted call / return
+  logic        d_fresh;        // D's instruction entered at the last edge
+  logic        dq_push, dq_pop;   // an unpredicted call / return entered D
   assign bht_q   = bht[f_pend_pc[10:2]];
   assign ras_top = ras[ras_sp];
   // synthesis translate_off
-  initial for (int i = 0; i < 512; i++) bht[i] = 2'd0;
+  initial begin
+    for (int i = 0; i < 512; i++) bht[i] = 2'd0;
+    for (int i = 0; i < 1024; i++) btb[i] = '0;
+  end
   // synthesis translate_on
-  // The targets are formed from the word's fields and the stack's top side
-  // by side, and what the word is only picks one: the path from the cache
-  // through the decode into f_pc/f_npc is the tightest here.
-  logic [31:0] pr_tbr, pr_tbr4, pr_tcall, pr_tcall4, pr_tret, pr_tret4;
-  logic        ras_ok;         // the top may be used (registers only)
+  always_ff @(posedge clk) begin
+    bt_raw   <= btb[f_pc[11:2]];
+    bt_fresh <= can_issue;
+    if (bt_fresh) bt_hold <= bt_raw;
+    if (bw_v) btb[bw_pc[11:2]] <= bw_ent;
+  end
+  assign bt = bt_fresh ? bt_raw : bt_hold;
   always_comb begin
-    logic [31:0] inst;
-    logic        bcc, call, back, ret;
-    inst = ifetch_rsp_i.inst;
-    bcc  = inst[31:30] == 2'b00 && (inst[24:22] == 3'b010 || inst[24:22] == 3'b110);   // Bicc, FBfcc
-    call = inst[31:30] == 2'b01;
-    back = inst[21];                                                                 // disp22 < 0
-    // ret, retl; not to pc + 4 (as for the branches below: the target would have the slot's pc)
+    logic hit, is_ret;
+    hit    = bt.v && bt.tag == f_pend_pc[19:12];
+    is_ret = bt.kind == K_RET;
+    // not to pc + 4, and a return only with something on the stack
     ras_ok = ras_cnt != 4'd0 && ras_top != f_pend_pc[31:2] - 30'd1;
-    ret  = (inst == 32'h81C7E008 || inst == 32'h81C3E008) && ras_ok;
-    pr_tbr    = f_pend_pc + {{8{inst[21]}}, inst[21:0], 2'b00};
-    pr_tbr4   = (f_pend_pc + 32'd4) + {{8{inst[21]}}, inst[21:0], 2'b00};
-    pr_tcall  = f_pend_pc + {inst[29:0], 2'b00};
-    pr_tcall4 = (f_pend_pc + 32'd4) + {inst[29:0], 2'b00};
-    pr_tret   = {ras_top + 30'd2, 2'b00};
-    pr_tret4  = {ras_top + 30'd3, 2'b00};
-    pr_target  = ret ? pr_tret  : call ? pr_tcall  : pr_tbr;
-    pr_target4 = ret ? pr_tret4 : call ? pr_tcall4 : pr_tbr4;
-    pr_inf     = ret ? ras_top : {28'd0, bht_q};
-    pr_ok = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 &&
-            (ret || ((call || (bcc && (inst[28:25] == 4'h8 || (inst[28:25] != 4'h0 && (back ^ bht_q[1]))))) &&
-                     inst[21:0] != 22'd1)) &&
+    pr_target  = is_ret ? {ras_top + 30'd2, 2'b00} : {bt.tgt, 2'b00};
+    pr_target4 = is_ret ? {ras_top + 30'd3, 2'b00} : {bt.tgt4, 2'b00};
+    pr_inf     = {is_ret, bht_q, is_ret ? ras_top : bt.tgt};
+    pr_ok = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 && hit &&
+            (is_ret ? ras_ok : ((bt.kind == K_JUMP || (bt.back ^ bht_q[1])) && bt.tgt != f_pend_pc[31:2] + 30'd1)) &&
             f_pend_npc == f_pend_pc + 32'd4 && f_pc == f_pend_pc + 32'd4 && !redirect && !flush;
-    pr_call = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 &&
-              (call || (inst[31:30] == 2'b10 && inst[24:19] == 6'h38 && inst[29:25] == 5'd15));   // call, jmpl ..., %o7
-    pr_ret  = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 && ret;
+    pr_push = pr_ok && !is_ret && bt.push;
+    pr_pop  = pr_ok && is_ret;
+    // the calls and returns that were not predicted: seen in D, from its register
+    dq_push = BPRED && d_fresh && d_valid && !d_pred &&
+              (d_inst[31:30] == 2'b01 || (d_inst[31:30] == 2'b10 && d_inst[24:19] == 6'h38 && d_inst[29:25] == 5'd15));
+    dq_pop  = BPRED && d_fresh && d_valid && !d_pred && (d_inst == 32'h81C7E008 || d_inst == 32'h81C3E008) &&
+              ras_cnt != 4'd0;
   end
   always_ff @(posedge clk)             // (no reset in this block: the stack is a RAM)
-    if (pr_call) ras[ras_sp + 3'd1] <= f_pend_pc[31:2];
+    if (dq_push)      ras[ras_sp + 3'd1] <= d_pc[31:2];
+    else if (pr_push) ras[ras_sp + 3'd1] <= f_pend_pc[31:2];
   always_ff @(posedge clk) begin
     if (rst) begin
       ras_sp <= '0; ras_cnt <= '0;
-    end else if (pr_call) begin
+    end else if (dq_push || (pr_push && !dq_pop)) begin
       ras_sp <= ras_sp + 3'd1;
       if (ras_cnt != 4'd8) ras_cnt <= ras_cnt + 4'd1;
-    end else if (pr_ret) begin
+    end else if (dq_pop || pr_pop) begin
       ras_sp <= ras_sp - 3'd1;
       ras_cnt <= ras_cnt - 4'd1;
     end
     if (bht_we) bht[e_pc[10:2]] <= bht_wd;
+    d_fresh <= f_take;
   end
   logic        f_buf_pred;     // the buffered instruction is a predicted DCTI
-  logic [29:0] f_buf_inf, f_b2_inf, d_inf, e_inf;   // pr_inf, travelling with the instruction
+  logic [32:0] f_buf_inf, f_b2_inf, d_inf, e_inf;   // pr_inf, travelling with the instruction
+  logic        e_annulled;     // E's instruction is an annulled delay slot (a NOP there)
 
   // What D would take this cycle
   logic        take_from_buf;
   logic [31:0] take_inst, take_pc, take_npc;
   logic [1:0]  take_fault;
   logic        take_pred;
-  logic [29:0] take_inf;
+  logic [32:0] take_inf;
   logic        take_avail;
   always_comb begin
     take_from_buf = f_have;
@@ -667,6 +702,7 @@ module iu
       e_npc <= (slot_in_d && redirect) ? redirect_target : d_npc;
       e_pred <= d_pred && !(slot_in_d && redirect);
       e_inf <= d_inf;
+      e_annulled <= d_annul_now;
       // the RF output is a cycle old: a write landing at this edge is taken here
       e_rs1 <= (rf_we && rf_rd == d_dec.rs1) ? rf_wdata : rf_q1;
       e_rs2 <= (rf_we && rf_rd == d_dec.rs2) ? rf_wdata : rf_q2;
@@ -840,9 +876,9 @@ module iu
   assign br_cond = cond_true(e_dec.cond, icc_fwd);
   assign e_addr  = a + b;
   assign e_wrval = a ^ b;
-  // A predicted DCTI's target is already being fetched; E only needs where
-  // it continues when the guess was wrong: pc + 8 (no register for it)
-  assign e_pc_disp = e_pc + (e_pred ? 32'd8 : (e_dec.cls == C_CALL ? e_disp30 : e_disp22));
+  // The branch or call target (E checks a guess against it; where a wrong
+  // guess of "taken" continues, pc + 8, is e_pc8 below)
+  assign e_pc_disp = e_pc + (e_dec.cls == C_CALL ? e_disp30 : e_disp22);
 
   always_comb begin
     e_taken  = 1'b0;
@@ -958,22 +994,59 @@ module iu
   end
   logic e_ctl_now;
   assign e_ctl_now = e_valid && !e_resolved && !e_trap && !e_tag_trap;
-  // (a predicted DCTI that is not taken, or annulled -- a NOP here --
-  // continues after its slot)
-  // A predicted return (the only JMPL that is): right when the register is
-  // the call's pc the guess was made from (the adder is not waited for)
-  logic e_ret_pred, e_ret_ok;
-  assign e_ret_pred = e_pred && e_dec.cls == C_JMPL;
-  assign e_ret_ok   = a == {e_inf, 2'b00};
-  assign redirect        = e_ctl_now && (e_ret_pred ? !e_ret_ok : e_pred ? !e_taken : e_taken);
-  assign redirect_target = (e_pred && !e_ret_pred) ? e_pc_disp : e_target;
+  // A predicted instruction (e_pred: the fetch went on at e_inf's target
+  // after its slot) was guessed right when it is what the entry said and
+  // goes there: a return whose register is the call's pc the guess was
+  // made from (the adder is not waited for), or a taken Bicc/FBfcc/CALL
+  // with that target. Anything else redirects: a taken transfer to its
+  // real target, an untaken one, an annulled one (a NOP here) or an
+  // instruction that is no transfer at all to pc + 8, after its slot.
+  logic        e_is_ret, e_is_br, e_pred_ok;
+  logic [31:0] e_pc8;
+  assign e_is_ret  = e_dec.cls == C_JMPL && (e_inst == 32'h81C7E008 || e_inst == 32'h81C3E008);
+  assign e_is_br   = e_dec.cls == C_BICC || e_dec.cls == C_FBFCC || e_dec.cls == C_CALL;
+  assign e_pc8     = e_pc + 32'd8;
+  assign e_pred_ok = e_inf[32] ? (e_is_ret && a == {e_inf[29:0], 2'b00})
+                               : (e_is_br && e_taken && e_pc_disp[31:2] == e_inf[29:0]);
+  assign redirect        = e_ctl_now && (e_pred ? !e_pred_ok : e_taken);
+  assign redirect_target = (e_pred && !e_taken) ? e_pc8 : e_target;
   // The history learns from every conditional branch E resolves
   always_comb begin
     logic against;
     against = e_taken != e_inst[21];
     bht_we  = BPRED && e_ctl_now && (e_dec.cls == C_BICC || e_dec.cls == C_FBFCC) && e_dec.cond[2:0] != 3'd0;
-    bht_wd  = against ? ((e_inf[1:0] == 2'd3) ? 2'd3 : e_inf[1:0] + 2'd1)
-                      : ((e_inf[1:0] == 2'd0) ? 2'd0 : e_inf[1:0] - 2'd1);
+    bht_wd  = against ? ((e_inf[31:30] == 2'd3) ? 2'd3 : e_inf[31:30] + 2'd1)
+                      : ((e_inf[31:30] == 2'd0) ? 2'd0 : e_inf[31:30] - 2'd1);
+  end
+  // The target buffer learns a taken transfer it did not predict, or
+  // predicted elsewhere, and forgets an entry that named something else
+  // (not for an annulled slot: that says nothing about the instruction).
+  // Not a branch to pc + 4 (see F). Written next cycle, target + 4 with it.
+  always_ff @(posedge clk) begin
+    bw_v <= 1'b0;
+    if (BPRED && e_ctl_now && !rst) begin
+      bw_pc    <= e_pc[19:2];
+      bw_inval <= 1'b0;
+      bw_push  <= e_dec.cls == C_CALL;
+      bw_back  <= e_inst[21];
+      bw_kind  <= e_is_ret ? K_RET : (e_dec.cls == C_CALL || e_dec.cond[2:0] == 3'd0) ? K_JUMP : K_BR;
+      bw_tgt   <= e_pc_disp[31:2];
+      if ((e_is_ret || (e_is_br && e_taken && e_pc_disp != e_pc + 32'd4)) && !(e_pred && e_pred_ok)) begin
+        bw_v <= 1'b1;
+      end else if (e_pred && !e_is_ret && !e_is_br && !e_annulled) begin
+        bw_v <= 1'b1; bw_inval <= 1'b1;
+      end
+    end
+  end
+  always_comb begin
+    bw_ent = '0;
+    bw_ent.v    = !bw_inval;
+    bw_ent.tag  = bw_pc[19:12];
+    bw_ent.kind = bw_kind;
+    bw_ent.push = bw_push;
+    bw_ent.back = bw_back;
+    bw_ent.tgt  = bw_tgt;
+    bw_ent.tgt4 = bw_tgt + 30'd1;
   end
   assign annul_slot      = e_ctl_now && e_annul;
 
