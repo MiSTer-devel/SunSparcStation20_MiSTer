@@ -51,7 +51,7 @@ mouse, and CS4231 audio. Licensed GPL-2.0-or-later.
 - CPUs at 65 MHz with no external cache (no SuperCache/MXCC). The 65 MHz
   build misses the timing analysis of the CPU clock by about 2 ns (it is
   tested on boards, not guaranteed over temperature);
-  `SunSparcStation20_20261114_55MHz.rbf` in `releases/` is the same core
+  `SunSparcStation20_55mhz_20261114.rbf` in `releases/` is the same core
   at 55 MHz, which meets it.
 - One frame buffer: the TCX, 8-bit only (no 24-bit TCX, cgsix or SX).
 - No floppy drive, no parallel port device, no ISDN (DBRI) audio.
