@@ -72,7 +72,7 @@ What is next: [docs/VERILOG-PLAN.md](docs/VERILOG-PLAN.md).
 
 ## Install
 
-1. Copy the rbf from `releases/` (`SunSparcStation20_20261114.rbf`) to
+1. Copy the rbf from `releases/` (`SunSparcStation20_65mhz_20261114.rbf`) to
    the SD card's `_Unstable/` (or `_Computer/`).
 2. Copy `releases/boot.rom` (OpenBIOS) to
    `games/SunSparcStation/boot.rom`, or use Sun's own PROM there instead.
