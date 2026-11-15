@@ -437,6 +437,22 @@ module ss20_machine #(
     if (rtc_seed) rtc_pend <= 1'b0;
   end
 
+  // Main's time in the chip's terms. The year: Main sends the last two
+  // digits; a Sun's TOD counts years from 1968 (OBP, SunOS and NetBSD all
+  // add 1968 to the year byte; QEMU's m48t59 on sun4m: base_year 1968), so
+  // 2026 is 58, not 26 (26 read as 1994: "Last shutdown is later than time
+  // on time-of-day chip"). Main's years are 2000-2099, so the byte is the
+  // two digits + 32, modulo 100, in BCD. The day of the week: Main sends
+  // 0-6 from Sunday, the chip holds 1-7.
+  logic [7:0] rtc_year, rtc_dow;
+  always_comb begin
+    logic [7:0] y;
+    y = 8'(rtc_i[47:44] * 4'd10) + 8'(rtc_i[43:40]) + 8'd32;
+    if (y >= 8'd100) y = y - 8'd100;
+    rtc_year = {4'(y / 8'd10), 4'(y % 8'd10)};
+    rtc_dow  = {5'd0, rtc_i[50:48]} + 8'd1;
+  end
+
   logic [23:0] seed;
   logic        seed_ok, seed_dl;
   always_ff @(posedge clk) begin
@@ -471,8 +487,8 @@ module ss20_machine #(
     .clk, .rst(rst_m), .bus_i(iob_q[2]), .bus_o(iob_r[2]),
     .img_we(nv_we), .img_addr(nv_addr), .img_be(nv_be), .img_wdata(nv_wdata), .img_rdata(nv_rdata),
     .seed_valid(rtc_seed),
-    .seed_sec(rtc_i[7:0]), .seed_min(rtc_i[15:8]), .seed_hour(rtc_i[23:16]), .seed_day(rtc_i[55:48]),
-    .seed_date(rtc_i[31:24]), .seed_month(rtc_i[39:32]), .seed_year(rtc_i[47:40]));
+    .seed_sec(rtc_i[7:0]), .seed_min(rtc_i[15:8]), .seed_hour(rtc_i[23:16]), .seed_day(rtc_dow),
+    .seed_date(rtc_i[31:24]), .seed_month(rtc_i[39:32]), .seed_year(rtc_year));
 
   // 3: the counter/timers, 4: the interrupt controller
   logic irq_tsys;
