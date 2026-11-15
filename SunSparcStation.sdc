@@ -1,7 +1,7 @@
 # SunSparcStation: the core's clocks (sys/sys_top.sdc has the framework's).
 #
-#   pll general[0]  65 MHz  clk_sys  the machine, hps_io, DDR3
-#   pll general[1]  65 MHz  clk_vid  the pixel clock (a phase apart, so that the PLL keeps two counters)
+#   pll general[0]  61.905 MHz (1300/21)  clk_sys  the machine, hps_io, DDR3
+#   pll general[1]  65 MHz (1300/20)      clk_vid  the pixel clock
 #
 # The two are unrelated: everything that crosses between them goes through
 # a synchroniser (the reset in ss20_machine today; the TCX scan-out's FIFO

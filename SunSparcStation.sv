@@ -233,7 +233,7 @@ wire       vid_ce, vid_hs, vid_vs, vid_de;
 wire [7:0] vid_r, vid_g, vid_b;
 wire       led_disk, led_user;
 
-ss20_machine #(.CLK_HZ(65_000_000)) machine
+ss20_machine #(.CLK_HZ(61_904_762)) machine
 (
 	.clk(clk_sys),
 	.rst(reset),
