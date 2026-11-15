@@ -272,7 +272,10 @@ module iu
   logic [3:0]  ras_cnt;        // entries that hold a call (0..8)
   logic [29:0] ras_top;
   logic        ras_ok;         // the top may be used
+  logic        pr_now;
   logic        pr_push, pr_pop;   // the arriving instruction is a predicted call / return
+  logic        pr_push_q, pr_pop_q;   // ... a cycle later: the stack moves then (nothing can read it sooner:
+  logic [29:0] pr_pc_q;               // the target's first word arrives two cycles after the transfer)
   logic        d_fresh;        // D's instruction entered at the last edge
   logic        dq_push, dq_pop;   // an unpredicted call / return entered D
   assign bht_q   = bht[f_pend_pc[10:2]];
@@ -299,9 +302,16 @@ module iu
     pr_target  = is_ret ? {ras_top + 30'd2, 2'b00} : {bt.tgt, 2'b00};
     pr_target4 = is_ret ? {ras_top + 30'd3, 2'b00} : {bt.tgt4, 2'b00};
     pr_inf     = {is_ret, bht_q, is_ret ? ras_top : bt.tgt};
-    pr_ok = BPRED && rsp_valid && ifetch_rsp_i.fault == 2'd0 && hit &&
-            (is_ret ? ras_ok : ((bt.kind == K_JUMP || (bt.back ^ bht_q[1])) && bt.tgt != f_pend_pc[31:2] + 30'd1)) &&
-            f_pend_npc == f_pend_pc + 32'd4 && f_pc == f_pend_pc + 32'd4 && !redirect && !flush;
+    // pr_now: the guess for the response on the lines, taken this cycle or
+    // not (it stays there while the buffer is full, and nothing is issued
+    // then). The fetch registers follow pr_now -- setting f_npc twice does
+    // no harm -- so that the pipeline's stall, which decides whether the
+    // response is taken, does not reach them through the prediction;
+    // pr_ok, with the response taken, marks the instruction.
+    pr_now = BPRED && ifetch_rsp_i.valid && f_pending && !f_pend_discard && ifetch_rsp_i.fault == 2'd0 && hit &&
+             (is_ret ? ras_ok : ((bt.kind == K_JUMP || (bt.back ^ bht_q[1])) && bt.tgt != f_pend_pc[31:2] + 30'd1)) &&
+             f_pend_npc == f_pend_pc + 32'd4 && f_pc == f_pend_pc + 32'd4 && !redirect && !flush;
+    pr_ok   = pr_now && rsp_valid;
     pr_push = pr_ok && !is_ret && bt.push;
     pr_pop  = pr_ok && is_ret;
     // the calls and returns that were not predicted: seen in D, from its register
@@ -311,20 +321,21 @@ module iu
               ras_cnt != 4'd0;
   end
   always_ff @(posedge clk)             // (no reset in this block: the stack is a RAM)
-    if (dq_push)      ras[ras_sp + 3'd1] <= d_pc[31:2];
-    else if (pr_push) ras[ras_sp + 3'd1] <= f_pend_pc[31:2];
+    if (dq_push)        ras[ras_sp + 3'd1] <= d_pc[31:2];
+    else if (pr_push_q) ras[ras_sp + 3'd1] <= pr_pc_q;
   always_ff @(posedge clk) begin
     if (rst) begin
       ras_sp <= '0; ras_cnt <= '0;
-    end else if (dq_push || (pr_push && !dq_pop)) begin
+    end else if (dq_push || (pr_push_q && !dq_pop)) begin
       ras_sp <= ras_sp + 3'd1;
       if (ras_cnt != 4'd8) ras_cnt <= ras_cnt + 4'd1;
-    end else if (dq_pop || pr_pop) begin
+    end else if (dq_pop || pr_pop_q) begin
       ras_sp <= ras_sp - 3'd1;
       ras_cnt <= ras_cnt - 4'd1;
     end
     if (bht_we) bht[e_pc[10:2]] <= bht_wd;
     d_fresh <= f_take;
+    pr_push_q <= pr_push && !rst; pr_pop_q <= pr_pop && !rst; pr_pc_q <= f_pend_pc[31:2];
   end
   logic        f_buf_pred;     // the buffered instruction is a predicted DCTI
   logic [32:0] f_buf_inf, f_b2_inf, d_inf, e_inf;   // pr_inf, travelling with the instruction
@@ -467,7 +478,7 @@ module iu
       end
       // BPRED: the slot is issued with the target as its npc (now), or the
       // target follows it when it is issued (later)
-      if (pr_ok) begin
+      if (pr_now) begin
         if (can_issue) begin
           f_pend_npc <= pr_target;
           f_pc <= pr_target;

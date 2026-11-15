@@ -18,3 +18,14 @@ if {[get_collection_size $clk_sys] != 1 || [get_collection_size $clk_vid] != 1} 
 }
 
 set_clock_groups -asynchronous -group $clk_sys -group $clk_vid
+
+# scsi_targets: the command bytes (cdb) are written only in S_CMD, and first
+# read in S_EXEC, which is entered a cycle after the last byte at the
+# earliest; every later reader is further away still. So whatever starts at
+# cdb has two cycles (the command decode -- LBA, counts, the MSF arithmetic,
+# the range checks -- into st and the result registers was the design's
+# longest path at 65 MHz).
+set cdb [get_registers {*scsi_targets:*|cdb[*][*]}]
+if {[get_collection_size $cdb] == 0} { error "SunSparcStation.sdc: scsi_targets' cdb registers not found" }
+set_multicycle_path -from $cdb -setup 2
+set_multicycle_path -from $cdb -hold 1
