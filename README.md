@@ -49,10 +49,10 @@ mouse, and CS4231 audio. Licensed GPL-2.0-or-later.
 
 - At most 464 MB of memory.
 - CPUs at 65 MHz with no external cache (no SuperCache/MXCC). The 65 MHz
-  build misses the timing analysis of the CPU clock by about 2 ns (it is
+  build misses the timing analysis of the CPU clock by about 0.5 ns (it is
   tested on boards, not guaranteed over temperature);
-  `SunSparcStation20_55mhz_20261114.rbf` in `releases/` is the same core
-  at 55 MHz, which meets it.
+  `SunSparcStation20_55mhz_20261114.rbf` in `releases/` is an earlier
+  build at 55 MHz, which meets it (without the clock fix of 2026-11-15).
 - One frame buffer: the TCX, 8-bit only (no 24-bit TCX, cgsix or SX).
 - No floppy drive, no parallel port device, no ISDN (DBRI) audio.
 - Sun's OBP is not included: the default boot rom is openbios, or supply your own SS20 PROM image.
@@ -61,7 +61,10 @@ mouse, and CS4231 audio. Licensed GPL-2.0-or-later.
 
 ## Known issues
 
-- The clock does not take the MiSTer's time.
+- The clock is set from the MiSTer's time when the core is loaded. The
+  MiSTer sends its local time and a Sun keeps its clock chip in GMT, so
+  set the guest's time zone to GMT for the right time of day (Solaris:
+  `TZ=GMT` in `/etc/TIMEZONE`; NetBSD: `/etc/localtime` -> `GMT`).
 - Under OpenBIOS, white shows pale yellow; Solaris's text console after
   X exits is white on white.
 - `psrinfo` reports 40 MHz under the Sun PROM (its own estimate).
@@ -72,7 +75,7 @@ What is next: [docs/VERILOG-PLAN.md](docs/VERILOG-PLAN.md).
 
 ## Install
 
-1. Copy the rbf from `releases/` (`SunSparcStation20_65mhz_20261114.rbf`) to
+1. Copy the rbf from `releases/` (`SunSparcStation20_65mhz_20261115.rbf`) to
    the SD card's `_Unstable/` (or `_Computer/`).
 2. Copy `releases/boot.rom` (OpenBIOS) to
    `games/SunSparcStation/boot.rom`, or use Sun's own PROM there instead.
