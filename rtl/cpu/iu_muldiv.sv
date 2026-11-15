@@ -77,14 +77,18 @@ module iu_muldiv (
   logic        ddone;
   logic        dz;
 
+  // The operands are taken as they are at the start and made magnitudes
+  // in the next cycle (dprep), from the registers: the IU's forwarding is
+  // not followed by the 64-bit negation.
+  logic        dprep;
   logic [63:0] n_abs;
   logic [31:0] d_abs;
   logic        n_neg, d_neg;
   always_comb begin
-    n_neg = signed_i & y_i[31];
-    d_neg = signed_i & b_i[31];
-    n_abs = n_neg ? -{y_i, a_i} : {y_i, a_i};
-    d_abs = d_neg ? -b_i : b_i;
+    n_neg = dsigned & rem[31];
+    d_neg = dsigned & den[31];
+    n_abs = n_neg ? -{rem, nq} : {rem, nq};
+    d_abs = d_neg ? -den : den;
   end
 
   always_ff @(posedge clk) begin
@@ -94,11 +98,19 @@ module iu_muldiv (
       drun <= 1'b0;
       dcnt <= '0;
       nq <= '0; den <= '0; rem <= '0;
-      qneg <= 1'b0; ovf_pre <= 1'b0; dsigned <= 1'b0;
+      qneg <= 1'b0; ovf_pre <= 1'b0; dsigned <= 1'b0; dprep <= 1'b0;
     end else if (kill_i) begin
       drun <= 1'b0;
+      dprep <= 1'b0;
     end else if (start_i & div_i) begin
-      if (b_i == 32'd0) begin
+      dprep   <= 1'b1;
+      nq      <= a_i;
+      den     <= b_i;
+      rem     <= y_i;
+      dsigned <= signed_i;
+    end else if (dprep) begin
+      dprep <= 1'b0;
+      if (den == 32'd0) begin
         dz <= 1'b1;
       end else begin
         drun    <= 1'b1;
@@ -108,7 +120,6 @@ module iu_muldiv (
         rem     <= n_abs[63:32];
         qneg    <= n_neg ^ d_neg;
         ovf_pre <= n_abs[63:32] >= d_abs;
-        dsigned <= signed_i;
       end
     end else if (drun) begin
       if (dcnt == 6'd0) begin
@@ -148,7 +159,7 @@ module iu_muldiv (
   // ---------------------------------------------------------------------
   // Outputs
   // ---------------------------------------------------------------------
-  assign busy_o     = drun | (|mstage);
+  assign busy_o     = drun | dprep | (|mstage);
   assign done_o     = ddone | mstage[3] | dz;
   assign div_zero_o = dz;
   always_comb begin

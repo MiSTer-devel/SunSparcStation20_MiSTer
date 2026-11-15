@@ -79,6 +79,8 @@ module iu
   output logic [19:0] dmem_bpage_o,   // ... both ahead, for the request M makes next cycle when E moves on,
   output logic        dmem_bsel_o,    // ... and takes rs2's when rs1 is only an offset within a page
   output logic        dmem_ego_o,     // E moves on at this edge (else M keeps its own address)
+  output logic        dmem_normal_o,  // the request's ASI is 0x08-0x0B (a register, like the ASI itself)
+  output logic        dmem_bypass_o,  // ... 0x20-0x2F
   input  dmem_rsp_t   dmem_rsp_i,
   output fpu_pkg::fpu_req_t fpu_req_o,
   input  fpu_pkg::fpu_rsp_t fpu_rsp_i,
@@ -643,7 +645,21 @@ module iu
   logic d_fp_quiet;            // this FP instruction needs the FP work ahead finished in E
   assign d_fp_quiet = is_fp(d_dec.cls) &&
                       (!FP_OVERLAP || d_dec.cls == C_FPSTORE || d_dec.cls == C_FBFCC || (d_dec.cls == C_FPLOAD && d_dec.fsr));
-  assign d_hazard = d_valid && !d_trap && (d_uses_rd_of_e || ser_inflight || (d_fp_quiet && fp_inflight));
+  // A JMPL or RETT takes its target from the registers as D read them, not
+  // through the forwarding (the forwarding into the target adder and the
+  // check of a predicted return, and from there into the fetch address,
+  // was the longest path of the pipeline): it waits in D while an
+  // instruction in E or M writes one of its sources, or an ldd in W has
+  // its second register still to write. (Pairs are matched as a whole.)
+  function automatic logic d_jsrc(input logic [3:0] rp);
+    return d_dec.rs1[4:1] == rp || (!d_dec.imm && d_dec.rs2[4:1] == rp);
+  endfunction
+  logic d_jmp_wait;
+  assign d_jmp_wait = (d_dec.cls == C_JMPL || d_dec.cls == C_RETT) &&
+                      ((e_valid && e_dec.wr_rd && d_jsrc(e_dec.rd[4:1])) ||
+                       (m_valid && m_dec.wr_rd && d_jsrc(m_dec.rd[4:1])) ||
+                       (w_valid && w_dec.cls == C_LOAD && w_dec.size == 2'd3 && !w_second && d_jsrc(w_dec.rd[4:1])));
+  assign d_hazard = d_valid && !d_trap && (d_uses_rd_of_e || ser_inflight || (d_fp_quiet && fp_inflight) || d_jmp_wait);
 
   assign d_go    = d_valid && !e_stall && !d_hazard;
   assign d_stall = d_valid && !d_go;
@@ -760,7 +776,7 @@ module iu
   function automatic logic [31:0] fwd(input logic [4:0] r, input logic [31:0] rf_val);
     logic m_is_ld;
     if (r == 5'd0) return 32'd0;
-    m_is_ld = m_dec.cls == C_LOAD || m_dec.cls == C_ATOMIC;
+    m_is_ld = m_ld;
     if (m_valid && m_dec.wr_rd && !m_trap && (!m_is_ld || m_acked)) begin
       if (m_dec.rd == r) return m_is_ld ? ld_extend(m_dec.size, m_dec.sgn, m_rdata) : m_result;
       if (m_dec.cls == C_LOAD && m_dec.size == 2'd3 && {m_dec.rd[4:1], 1'b1} == r) return m_rdata[31:0];
@@ -773,6 +789,7 @@ module iu
   endfunction
 
   logic [31:0] w_rdval;        // what W writes to rd (first cycle)
+  logic        m_ld;           // M's instruction is a load or ldstub/swap (a register: the forwarding's select)
   logic [31:0] w_ldval;        // W's load value, extended
 
   // The immediates, from the instruction word held in E (iu_decode's
@@ -886,6 +903,10 @@ module iu
   logic [31:0] e_pc_disp;      // the branch or call target, or pc + 8: one adder for all
   assign br_cond = cond_true(e_dec.cond, icc_fwd);
   assign e_addr  = a + b;
+  // JMPL/RETT: from the registers (nothing in flight writes them, see D)
+  logic [31:0] e_jaddr;
+  assign e_jaddr = (e_dec.rs1 == 5'd0 ? 32'd0 : e_rs1) +
+                   (e_dec.imm ? e_simm13 : e_dec.rs2 == 5'd0 ? 32'd0 : e_rs2);
   assign e_wrval = a ^ b;
   // The branch or call target (E checks a guess against it; where a wrong
   // guess of "taken" continues, pc + 8, is e_pc8 below)
@@ -893,7 +914,7 @@ module iu
 
   always_comb begin
     e_taken  = 1'b0;
-    e_target = e_addr;
+    e_target = e_jaddr;
     e_annul  = 1'b0;
     e_newcwp = cwp;
     e_misaligned = 1'b0;
@@ -917,8 +938,8 @@ module iu
       end
       C_JMPL, C_RETT: begin
         e_taken  = 1'b1;
-        e_target = e_addr;
-        e_misaligned = |e_addr[1:0];
+        e_target = e_jaddr;
+        e_misaligned = |e_jaddr[1:0];
       end
       C_LOAD, C_STORE, C_ATOMIC, C_FPLOAD, C_FPSTORE: begin
         case (e_dec.size)
@@ -1004,7 +1025,16 @@ module iu
     else if (e_valid) e_resolved <= 1'b1;
   end
   logic e_ctl_now;
-  assign e_ctl_now = e_valid && !e_resolved && !e_trap && !e_tag_trap;
+  // Not when the transfer itself traps in E. Only the traps a transfer can
+  // take are looked at: any other instruction that traps here (a tagged
+  // add's overflow, a misaligned load) may redirect if it was wrongly
+  // guessed to be a transfer -- the trap flushes that fetch anyway -- and
+  // the ALU and the address adder stay off the path to the fetch address.
+  logic e_ctl_trap;
+  assign e_ctl_trap = (e_dec.cls == C_RETT && (et || wim[e_newcwp])) ||
+                      ((e_dec.cls == C_JMPL || e_dec.cls == C_RETT) && e_misaligned) ||
+                      (e_dec.cls == C_FBFCC && (fpu_rsp_i.exc_pending || fpu_rsp_i.exc_state));
+  assign e_ctl_now = e_valid && !e_resolved && !e_trap && !e_ctl_trap;
   // A predicted instruction (e_pred: the fetch went on at e_inf's target
   // after its slot) was guessed right when it is what the entry said and
   // goes there: a return whose register is the call's pc the guess was
@@ -1017,7 +1047,7 @@ module iu
   assign e_is_ret  = e_dec.cls == C_JMPL && (e_inst == 32'h81C7E008 || e_inst == 32'h81C3E008);
   assign e_is_br   = e_dec.cls == C_BICC || e_dec.cls == C_FBFCC || e_dec.cls == C_CALL;
   assign e_pc8     = e_pc + 32'd8;
-  assign e_pred_ok = e_inf[32] ? (e_is_ret && a == {e_inf[29:0], 2'b00})
+  assign e_pred_ok = e_inf[32] ? (e_is_ret && e_rs1 == {e_inf[29:0], 2'b00})
                                : (e_is_br && e_taken && e_pc_disp[31:2] == e_inf[29:0]);
   assign redirect        = e_ctl_now && (e_pred ? !e_pred_ok : e_taken);
   assign redirect_target = (e_pred && !e_taken) ? e_pc8 : e_target;
@@ -1074,13 +1104,26 @@ module iu
     else                         fp_st_data = {32'd0, e_dec.rd[0] ? fpu_rsp_i.rd_data[31:0] : fpu_rsp_i.rd_data[63:32]};
   end
 
+  // The access's ASI, chosen in E and registered with its two classes (S
+  // cannot change between an instruction's E and M: what writes it
+  // serialises): the module's choice of the cache's address hangs off them.
+  logic [7:0] e_asi, m_asi;
+  logic       m_asi_normal, m_asi_bypass;
+  assign e_asi = e_dec.alt ? e_dec.asi : (s ? ASI_SUPV_DATA : ASI_USER_DATA);
+  assign dmem_normal_o = m_asi_normal;
+  assign dmem_bypass_o = m_asi_bypass;
   always_ff @(posedge clk) begin
     if (rst || flush) begin
       m_valid <= 1'b0;
       m_dec <= '0; m_trap <= 1'b0; m_tt <= '0;          // (the data as in E)
       m_icc <= '0; m_wicc <= 1'b0; m_wy <= 1'b0; m_newcwp <= '0;
       m_wd_late <= 1'b0;
+      m_asi <= '0; m_asi_normal <= 1'b0; m_asi_bypass <= 1'b0; m_ld <= 1'b0;
     end else if (e_go) begin
+      m_asi        <= e_asi;
+      m_ld         <= e_dec.cls == C_LOAD || e_dec.cls == C_ATOMIC;
+      m_asi_normal <= e_asi[7:2] == 6'b000010;
+      m_asi_bypass <= e_asi[7:4] == 4'h2;
       // the load ahead leaves M at this edge with its data still on the
       // cache's answer (not in m_rdata): the store reads it from W
       m_wd_late <= e_dec.cls == C_STORE && e_dec.size != 2'd3 && e_dec.rd != 5'd0 &&
@@ -1125,7 +1168,7 @@ module iu
     dmem_req_o.valid  = m_is_mem & ~m_acked & ~(w_valid & w_trap);
     dmem_req_o.write  = m_dec.cls == C_STORE || m_dec.cls == C_FPSTORE;
     dmem_req_o.atomic = m_dec.cls == C_ATOMIC;
-    dmem_req_o.asi    = m_dec.alt ? m_dec.asi : (s ? ASI_SUPV_DATA : ASI_USER_DATA);
+    dmem_req_o.asi    = m_asi;
     dmem_req_o.va     = m_result;
     dmem_req_o.size   = m_dec.size;
     dmem_req_o.wdata  = (m_dec.cls == C_ATOMIC && !m_dec.swap) ? 64'h0000_0000_0000_00FF :
@@ -1276,7 +1319,8 @@ module iu
   always_comb begin
     fpu_req_o = '0;
     fpu_req_o.rd_addr    = e_dec.rd;
-    fpu_req_o.fpop_valid = HAS_FPU && w_commit && w_dec.cls == C_FPOP;
+    // (w_commit for an FPop, without the ldd's second cycle: off the FPU's start path)
+    fpu_req_o.fpop_valid = HAS_FPU && w_valid && !w_fp_hold && !w_trap && !error && w_dec.cls == C_FPOP;
     fpu_req_o.fpop_inst  = w_inst;
     fpu_req_o.fpop_pc    = w_pc;
     fpu_req_o.trap_taken = HAS_FPU && w_take_trap && et && w_tt == TT_FP_EXCEPTION;
@@ -1291,6 +1335,13 @@ module iu
 
 `ifndef SYNTHESIS
   // synthesis translate_off
+  always_ff @(posedge clk)
+    if (!rst && m_valid && m_asi != (m_dec.alt ? m_dec.asi : (s ? ASI_SUPV_DATA : ASI_USER_DATA)))
+      $display("%m: MASI MISMATCH pc %h: %h", m_pc, m_asi);
+  // a JMPL/RETT's registers are final when it is in E (see D)
+  always_ff @(posedge clk)
+    if (!rst && e_valid && !e_trap && (e_dec.cls == C_JMPL || e_dec.cls == C_RETT) && e_jaddr != e_addr)
+      $display("%m: JADDR MISMATCH pc %h: %h, forwarded %h", e_pc, e_jaddr, e_addr);
   // the delay slot is never the buffer's second entry (see F)
   always_ff @(posedge clk)
     if (!rst && (redirect || annul_slot) && f_have2 && f_b2_pc == slot_pc && !slot_in_d && !slot_in_buf)

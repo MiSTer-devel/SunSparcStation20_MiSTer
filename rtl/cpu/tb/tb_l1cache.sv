@@ -39,10 +39,15 @@ module tb_l1cache;
   initial begin req_q = 0; we = 0; cacheable = 1; pa = '0; idx = '0; be = '1; wdata = '0; snoop = '0; end
   assign req = req_q & ~done;
 
+  logic [63:0] rdata_al;
+  logic        unused_al;
+  logic        errq;
+  assign unused_al = &{1'b0, rdata_al, errq};
   l1cache #(.ICACHE(1'b0), .FAST_HIT(1'b1)) dut (
     .clk, .rst, .enable_i(1'b1), .mid_i(4'd8),
     .req_i(req), .freq_i(1'b0), .we_i(we), .atomic_i(1'b0), .cacheable_i(cacheable), .pa_i(pa), .idx_i(idx),
-    .be_i(be), .wdata_i(wdata), .taken_o(taken), .done_o(done), .fast_o(fast), .rdata_o(rdata), .err_o(err),
+    .be_i(be), .wdata_i(wdata), .taken_o(taken), .done_o(done), .fast_o(fast), .rdata_o(rdata), .err_o(err), .errq_o(errq), .fpa_i(pa[35:12]),
+    .al_size_i(2'd3), .al_a_i(3'd0), .rdata_al_o(rdata_al),
     .inval_i(1'b0), .inval_line_i('0), .snoop_i(snoop), .snoop_hold_o(snoop_hold),
     .flash_v_i(1'b0), .flash_l_i(1'b0), .flash_busy_o(flash_busy),
     .diag_req_i(1'b0), .diag_we_i(1'b0), .diag_tag_i(1'b0), .diag_va_i('0), .diag_wdata_i('0),

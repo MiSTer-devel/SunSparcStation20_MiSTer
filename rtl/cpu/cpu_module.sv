@@ -74,11 +74,13 @@ module cpu_module
   logic [19:0] d_apage, d_bpage;       // ... and the pages E's address registers name (the micro-TLB looks them up ahead)
   logic        d_bsel;                 // rs2's is the address's page (rs1 is an offset)
   logic        d_ego;                  // E hands its instruction to M at this edge
+  logic        d_asi_normal, d_asi_bypass;   // the request's ASI class, from the IU's registers
   logic [7:0]  dbg_mmu, dbg_ic, dbg_dc;
 
   iu #(.HAS_FPU(HAS_FPU)) u_iu (
     .clk, .rst(iu_rst), .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_nidx_o(d_nidx),
-    .dmem_apage_o(d_apage), .dmem_bpage_o(d_bpage), .dmem_bsel_o(d_bsel), .dmem_ego_o(d_ego), .dmem_rsp_i(dms),
+    .dmem_apage_o(d_apage), .dmem_bpage_o(d_bpage), .dmem_bsel_o(d_bsel), .dmem_ego_o(d_ego),
+    .dmem_normal_o(d_asi_normal), .dmem_bypass_o(d_asi_bypass), .dmem_rsp_i(dms),
     .fpu_req_o(fpr), .fpu_rsp_i(fps), .irl_i, .error_o(iu_error), .cwp_o(iu_cwp), .halt_o(iu_halt),
     .dbg_commit_o, .dbg_trap_o, .dbg_tt_o, .dbg_pc_o, .dbg_psr_o, .dbg_pipe_o(dbg_pipe));
 
@@ -173,7 +175,8 @@ module cpu_module
   l1cache #(.ICACHE(1'b1)) u_ic (
     .clk, .rst, .enable_i(ie), .mid_i,
     .req_i(ic_req), .freq_i(1'b0), .we_i(1'b0), .atomic_i(1'b0), .cacheable_i(ic_cacheable), .pa_i(ic_pa), .idx_i(ic_idx), .be_i(8'hFF), .wdata_i(64'd0),
-    .taken_o(ic_taken), .done_o(ic_done), .fast_o(ic_fast), .rdata_o(ic_rdata), .err_o(ic_err),
+    .taken_o(ic_taken), .done_o(ic_done), .fast_o(ic_fast), .rdata_o(ic_rdata), .err_o(ic_err), .errq_o(ic_errq), .fpa_i(ic_pa[35:12]),
+    .al_size_i(2'd3), .al_a_i(3'd0), .rdata_al_o(ic_rdata_al),
     .inval_i(ic_inval), .inval_line_i(inval_line), .snoop_i(snoop_m), .snoop_hold_o(ic_hold),
     .flash_v_i(ic_flash_v), .flash_l_i(ic_flash_l), .flash_busy_o(ic_flash_busy),
     .diag_req_i(ic_dg_req), .diag_we_i(dmr.write), .diag_tag_i(!dmr.asi[0]), .diag_va_i(dmr.va), .diag_wdata_i(diag_wdata),
@@ -189,7 +192,11 @@ module cpu_module
   logic [35:0] dc_pa;
   logic [8:0]  dc_idx;
   logic [7:0]  dc_be;
-  logic [63:0] dc_wdata, dc_rdata;
+  logic [63:0] dc_wdata, dc_rdata, dc_rdata_al;
+  logic [63:0] ic_rdata_al;            // (the I-cache aligns nothing)
+  logic        unused_al;
+  logic        ic_errq, dc_errq;
+  assign unused_al = &{1'b0, dc_rdata, ic_rdata_al, dc_errq, ic_err};
 
   // The walker's R/M writes are this module's own, which the D-cache does
   // not take from the snoop broadcast: drop the line they hit explicitly
@@ -203,7 +210,8 @@ module cpu_module
   l1cache #(.ICACHE(1'b0), .FAST_HIT(1'b1)) u_dc (
     .clk, .rst, .enable_i(de), .mid_i,
     .req_i(dc_req), .freq_i(d_hit_now), .we_i(dc_we), .atomic_i(dc_atomic), .cacheable_i(dc_cacheable), .pa_i(dc_pa), .idx_i(dc_idx), .be_i(dc_be), .wdata_i(dc_wdata),
-    .taken_o(dc_taken), .done_o(dc_done), .fast_o(dc_fast), .rdata_o(dc_rdata), .err_o(dc_err),
+    .taken_o(dc_taken), .done_o(dc_done), .fast_o(dc_fast), .rdata_o(dc_rdata), .err_o(dc_err), .errq_o(dc_errq), .fpa_i(d_fast_pa[35:12]),
+    .al_size_i(dmr.size), .al_a_i(dmr.va[2:0]), .rdata_al_o(dc_rdata_al),
     .inval_i(dc_inval_any), .inval_line_i(dc_inval_line), .snoop_i(snoop_m), .snoop_hold_o(dc_hold),
     .flash_v_i(dc_flash_v), .flash_l_i(dc_flash_l), .flash_busy_o(dc_flash_busy),
     .diag_req_i(dc_dg_req), .diag_we_i(dmr.write), .diag_tag_i(!dmr.asi[0]), .diag_va_i(dmr.va), .diag_wdata_i(diag_wdata),
@@ -388,7 +396,7 @@ module cpu_module
     if (is == I_CACHE && ic_done) begin
       ifs_now.valid = 1'b1;
       ifs_now.inst  = ic_pa_q[2] ? ic_rdata[31:0] : ic_rdata[63:32];
-      ifs_now.fault = ic_err ? 2'd2 : 2'd0;
+      ifs_now.fault = ic_errq ? 2'd2 : 2'd0;   // (from the cache's registers: off the hit)
     end
   end
   assign ifs = ifs_hold_v ? ifs_hold : ifs_now;
@@ -478,16 +486,6 @@ module cpu_module
       default: return w;
     endcase
   endfunction
-  function automatic logic [63:0] lanes_rdata(input logic [1:0] size, input logic [2:0] a, input logic [63:0] r);
-    logic [63:0] sh;
-    sh = r << (a * 8);                         // the addressed byte to the top
-    case (size)
-      2'd0: return {56'd0, sh[63:56]};
-      2'd1: return {48'd0, sh[63:48]};
-      2'd2: return {32'd0, sh[63:32]};
-      default: return r;
-    endcase
-  endfunction
   /* verilator lint_on UNUSEDSIGNAL */
 
   typedef enum logic [3:0] {
@@ -558,8 +556,8 @@ module cpu_module
     if (bk_we) bk_m[bk_wa] <= bk_wd;
   end
 
-  assign d_normal   = dmr.asi[7:2] == 6'b000010;              // 0x08-0x0B
-  assign d_bypass   = dmr.asi[7:4] == 4'h2;                   // 0x20-0x2F
+  assign d_normal   = d_asi_normal;                           // 0x08-0x0B
+  assign d_bypass   = d_asi_bypass;                           // 0x20-0x2F
   assign d_flushasi = (dmr.asi[7:3] == 5'b00010 && dmr.asi[2:0] <= 3'd4) ||   // 0x10-0x14
                       (dmr.asi[7:3] == 5'b00011 && dmr.asi[2:0] <= 3'd4);     // 0x18-0x1C
   assign d_at       = {dmr.write | dmr.atomic, ~dmr.asi[1], dmr.asi[0]};
@@ -751,8 +749,10 @@ module cpu_module
   // The cache's doubleword is aligned once, by the VA's low bits (a PA's
   // low bits are the VA's, on the fast path and from the register alike:
   // one shifter, not one per path).
+  // (The alignment is made in the cache, on each way beside the tag
+  // compare, so that the way select is the last step into the IU.)
   logic [63:0] dc_lanes;
-  assign dc_lanes = lanes_rdata(dmr.size, dmr.va[2:0], dc_rdata);
+  assign dc_lanes = dc_rdata_al;
   always_comb begin
     dms = dms_q;
     if (dms_q.ack && bk_sel_q) dms.rdata = {28'd0, bk_q};     // a breakpoint/counter register, read a cycle ago

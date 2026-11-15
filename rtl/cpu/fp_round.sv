@@ -74,25 +74,16 @@ module fp_round
   // 2. Tininess after rounding: round at the precision as a normal and
   //    look at the exponent that results.
   logic signed [13:0] emin, emax;
-  logic [52:0] kept_n;
-  logic        guard_n, sticky_n, ones_n;
-  logic        t_low1, t_edge1;
+  logic        t_maybe1;
 
   always_comb begin
     emin = dbl_i ? -14'sd1022 : -14'sd126;
     emax = dbl_i ?  14'sd1023 :  14'sd127;
-    if (dbl_i) begin
-      kept_n = mn1[57:5]; guard_n = mn1[4]; sticky_n = (|mn1[3:0]) | v_i.sticky;
-    end else begin
-      kept_n = {mn1[57:34], 29'd0}; guard_n = mn1[33]; sticky_n = (|mn1[32:0]) | v_i.sticky;
-    end
     // Tiny below emin - 1; at emin - 1 unless the rounding carries into
-    // emin. Only the parts are formed here; the rounding decision and the
-    // carry are finished from their registers in the next cycle (the
-    // normalisation before them is this stage's length already).
-    ones_n  = dbl_i ? (&kept_n) : (&kept_n[52:29]);
-    t_low1  = !is_zero1 && en1 < emin - 14'sd1;
-    t_edge1 = !is_zero1 && en1 == emin - 14'sd1;
+    // emin (decided from the stage register, below).
+    // What can be tiny at all, without the normaliser's count (en1 is at
+    // most exp + 2 and at least exp - 55): for the registered tiny_o
+    t_maybe1 = v_i.exp <= emin + 14'sd54;
   end
 
   // The stage register; held, a tiny value moves down a bit a cycle to
@@ -101,17 +92,28 @@ module fp_round
   logic [57:0] mn;
   logic signed [13:0] en;
   logic        is_zero, tiny, sign, sticky_in;
-  logic        t_low, t_edge, ones_q, lsb_q, guard_q, sticky_q;
-  assign tiny = t_low || (t_edge && !(ones_q && round_up_f(rd_i, sign, lsb_q, guard_q, sticky_q)));
+  // At the edge (one below the smallest normal's exponent) the value is
+  // tiny unless rounding carries it up to the smallest normal: all kept
+  // bits set and a round up. That is read from the stage in its first
+  // cycle, before any denormalising step, and kept (the normaliser in
+  // front of the stage is not followed by this test: it was the FPU's
+  // longest path).
+  logic        t_maybe, first, tiny_q, tiny_now;
+  logic        round_up;
+  logic [52:0] kept;
+  assign tiny_now = !is_zero && (en < emin - 14'sd1 ||
+                                 (en == emin - 14'sd1 && !((dbl_i ? (&kept) : (&kept[52:29])) && round_up)));
+  assign tiny = first ? tiny_now : tiny_q;
   logic        dn_step;
   assign dn_step = tiny && en < emin && mn != '0;
   assign busy_o  = dn_step;
-  assign tiny_o  = tiny;
+  assign tiny_o  = t_maybe;             // (a register: every tiny value and some small normals)
   always_ff @(posedge clk) begin
+    first <= !hold_i;
+    if (first) tiny_q <= tiny_now;
     if (!hold_i) begin
       mn <= mn1; en <= en1; is_zero <= is_zero1;
-      t_low <= t_low1; t_edge <= t_edge1; ones_q <= ones_n;
-      lsb_q <= dbl_i ? kept_n[0] : kept_n[29]; guard_q <= guard_n; sticky_q <= sticky_n;
+      t_maybe <= t_maybe1;
       sign <= v_i.sign; sticky_in <= v_i.sticky;
     end else if (dn_step) begin
       mn <= mn >> 1; en <= en + 14'sd1; sticky_in <= sticky_in | mn[0];
@@ -122,12 +124,10 @@ module fp_round
   //    now: the stage register's denormalisation)
   logic [57:0] ms;
   logic        sticky_s;
-  logic [52:0] kept;
   logic        guard, sticky;
   logic [52:0] kept_r;
   logic        carry;
   logic signed [13:0] e_r;
-  logic        round_up;
   logic        inexact;
   logic        of;
 

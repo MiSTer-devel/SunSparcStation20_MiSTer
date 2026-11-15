@@ -76,6 +76,7 @@ module l1cache
   input  logic        atomic_i,
   input  logic        cacheable_i,
   input  logic [35:0] pa_i,
+  input  logic [35:12] fpa_i,        // FAST_HIT: pa_i's page when freq_i is up (the fast hit compares this one)
   input  logic [8:0]  idx_i,         // = the VA's [11:3]: the RAM index, so that it does not wait for the TLB
   input  logic [7:0]  be_i,
   input  logic [63:0] wdata_i,
@@ -84,6 +85,12 @@ module l1cache
   output logic        fast_o,        // done_o for a read hit in its request cycle (FAST_HIT)
   output logic [63:0] rdata_o,
   output logic        err_o,
+  output logic        errq_o,        // err_o from registers alone (an error never comes with a hit)
+  // D-cache: the answer with the addressed bytes right-aligned (a load's
+  // size and VA[2:0], held with the request)
+  input  logic [1:0]  al_size_i,
+  input  logic [2:0]  al_a_i,
+  output logic [63:0] rdata_al_o,
 
   // Line invalidation (the flush ASIs) and the snoop broadcast
   input  logic        inval_i,
@@ -626,6 +633,44 @@ module l1cache
   assign rdata_o = ICACHE ? (hit_now ? hit_data : fast_ld ? da_rdata[fhit_idx] : rdata_q)
                           : (done_q ? rdata_q : hit_data);
   assign err_o   = (hit_now || wr_now || fast) ? 1'b0 : err_q;
+  assign errq_o  = done_q && err_q;
+`ifndef SYNTHESIS
+  // synthesis translate_off
+  always_ff @(posedge clk)
+    if (!rst && done_o && err_o != errq_o) $display("%m: ERRQ MISMATCH");
+  always_ff @(posedge clk)
+    if (!rst && freq_i && fpa_i != pa_i[35:12]) $display("%m: FPA MISMATCH");
+  // synthesis translate_on
+`endif
+  // The aligned answer: every way's doubleword (and the registered one) is
+  // aligned while the tags are compared, and the way select comes last.
+  // One shifter behind the select was two more levels on the load path.
+  function automatic logic [63:0] lanes_al(input logic [1:0] size, input logic [2:0] a, input logic [63:0] r);
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [63:0] sh;
+    /* verilator lint_on UNUSEDSIGNAL */
+    sh = r << {a, 3'b000};                     // the addressed byte to the top
+    case (size)
+      2'd0: return {56'd0, sh[63:56]};
+      2'd1: return {48'd0, sh[63:48]};
+      2'd2: return {32'd0, sh[63:32]};
+      default: return r;
+    endcase
+  endfunction
+  genvar aw;
+  generate
+    if (ICACHE) begin : g_noal
+      assign rdata_al_o = '0;
+      logic unused_al;
+      assign unused_al = &{1'b0, al_size_i, al_a_i};
+    end else begin : g_al
+      logic [63:0] da_al [WAYS];
+      for (aw = 0; aw < WAYS; aw++) begin : g_way
+        assign da_al[aw] = lanes_al(al_size_i, al_a_i, da_rdata[aw]);
+      end
+      assign rdata_al_o = done_q ? lanes_al(al_size_i, al_a_i, rdata_q) : da_al[rd_idx];
+    end
+  endgenerate
   // The request's fields are latched whenever one could be taken, whether
   // or not req_i is up (the CPU side's request valid comes late: it hangs
   // off the answer of the previous request); only the state change waits
@@ -650,7 +695,7 @@ module l1cache
   always_comb begin
     fhit_way = '0;
     for (int i = 0; i < WAYS; i++)
-      fhit_way[i] = (ta_rdata[i][23:0] == pa_i[35:12]) && tag_v(ta_rdata[i], pa_i);
+      fhit_way[i] = (ta_rdata[i][23:0] == fpa_i) && tag_v(ta_rdata[i], pa_i);
     fhit = |fhit_way;
     fhit_idx = '0;
     for (int i = WAYS - 1; i >= 0; i--) if (fhit_way[i]) fhit_idx = WW'(i);

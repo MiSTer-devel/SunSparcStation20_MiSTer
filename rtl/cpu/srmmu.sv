@@ -489,6 +489,23 @@ module srmmu
   logic [5:0]  tv_wi, lk_wi, used_wi;
   logic [63:0] victim_oh;
   assign victim_oh = 64'd1 << victim;
+  // "Every entry used but the victim", for the history clear: from a
+  // registered summary of the used bits (none clear, or one and which),
+  // compared with the victim, not an AND over the vector behind the
+  // victim's decode. The summary is a cycle old; the history is only a
+  // replacement policy, so a clear one fill early or late does no harm.
+  logic        nu_none_q, nu_one_q;
+  logic [5:0]  nu_idx_q;
+  always_ff @(posedge clk) begin
+    logic [63:0] nu;
+    logic [5:0]  ni;
+    nu = ~used;
+    ni = 6'd0;
+    for (int i = 0; i < 64; i++) if (nu[i]) ni = ni | 6'(i);   // (the index when one bit is set)
+    nu_none_q <= nu == '0;
+    nu_one_q  <= (nu & (nu - 64'd1)) == '0;
+    nu_idx_q  <= ni;
+  end
   always_comb begin
     tv_we = 1'b0; tv_wi = img_entry; tv_wv = reg_wdata_i[5];
     lk_we = 1'b0; lk_wi = img_entry; lk_wv = reg_wdata_i[0];
@@ -510,7 +527,7 @@ module srmmu
     // §4.11.4), the locked ones' kept
     used_we       = fill_go || (lk_go && h_hit);
     used_wi       = fill_go ? fill_idx : h_idx;
-    used_hist_clr = fill_go && !w_rep && &(used | victim_oh);
+    used_hist_clr = fill_go && !w_rep && (nu_none_q || (nu_one_q && nu_idx_q == victim));
   end
 
   // ---------------------------------------------------------------------
