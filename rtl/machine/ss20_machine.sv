@@ -415,14 +415,26 @@ module ss20_machine #(
   assign uart_rts_o = 1'b0;
   assign uart_dtr_o = 1'b0;
 
-  // 2: the M48T08, its clock seeded from the MiSTer's RTC (BCD) at the
-  // first update, its 8 KB kept in the image on SD slot 3 by nvram_sd
-  // (which also stamps the ID PROM from ioctl index 64's serial)
-  logic rtc_t, rtc_seen;
+  // 2: the M48T08, its clock seeded from the MiSTer's RTC (BCD), its 8 KB
+  // kept in the image on SD slot 3 by nvram_sd (which also stamps the ID
+  // PROM from ioctl index 64's serial).
+  // The seed is taken once, at Main's first update (it sends the time as
+  // it starts the core, usually while the machine is still in reset: the
+  // update is remembered and the chip is loaded as the reset ends). Not
+  // again at a later reset: the chip has kept counting, and hps_io's copy is
+  // as old as the core's start. Waiting for a second update, as this did,
+  // left the clock unset: Main sends one, and the PROM and the OS read the
+  // chip in the first seconds ("Time-of-day chip had incorrect date", and
+  // the date then came from the file system).
+  /*verilator lint_off PROCASSINIT*/     // (not reset: the seed is taken once a configuration)
+  logic rtc_t = 1'b0, rtc_pend = 1'b0, rtc_seeded = 1'b0;
+  /*verilator lint_on PROCASSINIT*/
+  logic rtc_seed;
+  assign rtc_seed = !rst_m && rtc_pend;       // (the chip's own reset: the NVRAM image loads first)
   always_ff @(posedge clk) begin
     rtc_t <= rtc_i[64];
-    if (rst) rtc_seen <= 1'b0;
-    else if (rtc_t != rtc_i[64]) rtc_seen <= 1'b1;
+    if (rtc_t != rtc_i[64] && !rtc_seeded) begin rtc_pend <= 1'b1; rtc_seeded <= 1'b1; end
+    if (rtc_seed) rtc_pend <= 1'b0;
   end
 
   logic [23:0] seed;
@@ -458,7 +470,7 @@ module ss20_machine #(
   m48t08 #(.CLK_HZ(CLK_HZ)) u_nvram (
     .clk, .rst(rst_m), .bus_i(iob_q[2]), .bus_o(iob_r[2]),
     .img_we(nv_we), .img_addr(nv_addr), .img_be(nv_be), .img_wdata(nv_wdata), .img_rdata(nv_rdata),
-    .seed_valid(rtc_seen && rtc_t != rtc_i[64]),
+    .seed_valid(rtc_seed),
     .seed_sec(rtc_i[7:0]), .seed_min(rtc_i[15:8]), .seed_hour(rtc_i[23:16]), .seed_day(rtc_i[55:48]),
     .seed_date(rtc_i[31:24]), .seed_month(rtc_i[39:32]), .seed_year(rtc_i[47:40]));
 
