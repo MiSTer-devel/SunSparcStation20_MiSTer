@@ -22,7 +22,15 @@
 module sun_mouse #(
   parameter int CLK_HZ     = 55_000_000,
   parameter int BAUD       = 1200,
-  parameter int BYTE_CLKS  = CLK_HZ * 10 / BAUD
+  parameter int BYTE_CLKS  = CLK_HZ * 10 / BAUD,
+  // SERIAL: the bytes go out on txd_o as a real 1200-baud line (8N1), for
+  // the serial chip's own receiver, and the byte port is not used. A guest
+  // that listens at another rate then sees what a real mouse gives it:
+  // garbage and breaks. Solaris's mouse module finds the rate that way (it
+  // opens at 9600 and steps down on a break); handed whole bytes whatever
+  // the rate, it never saw a break and threw away the first 48 samples
+  // after every boot as "not settled".
+  parameter bit SERIAL     = 1'b0
 )(
   input  logic        clk,
   input  logic        rst,
@@ -32,7 +40,8 @@ module sun_mouse #(
   // the ESCC channel B byte port (escc.sv rx_byte_b_*)
   output logic [7:0]  rx_byte_o,
   output logic        rx_byte_valid_o,
-  input  logic        rx_byte_ready_i
+  input  logic        rx_byte_ready_i,
+  output logic        txd_o
 );
 
   localparam int AW = 12;               // accumulator width (signed)
@@ -51,7 +60,33 @@ module sun_mouse #(
   logic [31:0]        baud_cnt;
 
   assign rx_byte_o       = pend_byte;
-  assign rx_byte_valid_o = pend && rx_byte_ready_i;
+  // SERIAL: the serialiser takes the byte when the line is free
+  localparam int BIT_CLKS = CLK_HZ / BAUD;
+  localparam int GAP_CLKS = SERIAL ? 2 : BYTE_CLKS;   // (the serialiser paces the bytes itself)
+  logic        ser_busy;
+  logic [9:0]  ser_sh;                  // {stop, data, start}, sent from bit 0
+  logic [3:0]  ser_n;
+  logic [31:0] ser_cnt;
+  logic        byte_take;
+  assign byte_take       = pend && (SERIAL ? !ser_busy : rx_byte_ready_i);
+  assign rx_byte_valid_o = SERIAL ? 1'b0 : byte_take;
+  assign txd_o           = ser_busy ? ser_sh[0] : 1'b1;
+  always_ff @(posedge clk) begin
+    if (rst || !SERIAL) begin
+      ser_busy <= 1'b0; ser_sh <= '1; ser_n <= '0; ser_cnt <= '0;
+    end else if (!ser_busy) begin
+      if (pend) begin
+        ser_busy <= 1'b1; ser_sh <= {1'b1, pend_byte, 1'b0}; ser_n <= 4'd10; ser_cnt <= '0;
+      end
+    end else if (ser_cnt == 32'(BIT_CLKS - 1)) begin
+      ser_cnt <= '0;
+      ser_sh  <= {1'b1, ser_sh[9:1]};
+      ser_n   <= ser_n - 4'd1;
+      if (ser_n == 4'd1) ser_busy <= 1'b0;
+    end else begin
+      ser_cnt <= ser_cnt + 32'd1;
+    end
+  end
 
   // PS/2 packet -> signed deltas (an overflow saturates at +-255)
   logic signed [AW-1:0] pdx, pdy;
@@ -131,13 +166,13 @@ module sun_mouse #(
         pkt[4]   <= dy2[7:0];
       end
 
-      if (rx_byte_valid_o) begin
+      if (byte_take) begin
         pend <= 1'b0;
         if (idx == 3'd5) busy <= 1'b0;
       end
 
       if (busy && !pend && idx != 3'd5) begin
-        if (baud_cnt == 32'(BYTE_CLKS - 1)) begin
+        if (baud_cnt == 32'(GAP_CLKS - 1)) begin
           pend      <= 1'b1;
           pend_byte <= pkt[idx[2:0]];
           idx       <= idx + 3'd1;

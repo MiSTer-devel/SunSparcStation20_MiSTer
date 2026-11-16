@@ -22,7 +22,31 @@ module tb_sun_mouse;
 
   sun_mouse #(.BYTE_CLKS(BYTE_CLKS)) dut (
     .clk, .rst, .ps2_mouse_i(ps2m),
-    .rx_byte_o(rx_byte), .rx_byte_valid_o(rx_valid), .rx_byte_ready_i(rx_ready));
+    .rx_byte_o(rx_byte), .rx_byte_valid_o(rx_valid), .rx_byte_ready_i(rx_ready), .txd_o(txd_unused));
+
+  // SERIAL: the same packets as a 1200-baud line (here 40 clocks a bit),
+  // read back by a plain 8N1 receiver that samples mid-bit
+  localparam int SBIT = 40;
+  logic       s_txd, txd_unused, s_valid;
+  logic [7:0] s_byte;
+  sun_mouse #(.CLK_HZ(SBIT * 1200), .BAUD(1200), .SERIAL(1'b1)) dut_s (
+    .clk, .rst, .ps2_mouse_i(ps2m),
+    .rx_byte_o(s_byte), .rx_byte_valid_o(s_valid), .rx_byte_ready_i(1'b0), .txd_o(s_txd));
+  logic [7:0] sq [$];
+  int         s_fe;
+  initial begin
+    s_fe = 0;
+    forever begin
+      logic [7:0] c;
+      @(negedge s_txd);
+      repeat (SBIT / 2) @(posedge clk);
+      if (s_txd) continue;
+      for (int i = 0; i < 8; i++) begin repeat (SBIT) @(posedge clk); c[i] = s_txd; end
+      repeat (SBIT) @(posedge clk);
+      if (!s_txd) s_fe++;
+      sq.push_back(c);
+    end
+  end
 
   initial begin
     clk = 1'b0;
@@ -152,6 +176,16 @@ module tb_sun_mouse;
     check(rxq.size() == 0, "not ready: nothing delivered");
     rx_ready = 1'b1;
     expect_bytes("ready again", "87 07 07 00 00");
+
+    // the serial copy sent every byte the byte port's instance was given
+    // up to the "not ready" case, and that case's packet without waiting
+    repeat (40 * 10 * SBIT) @(posedge clk);
+    check(s_fe == 0, "serial: no framing error");
+    check(!s_valid, "serial: the byte port stays quiet");
+    check(sq.size() >= 10 && sq.size() % 5 == 0, $sformatf("serial: whole packets (%0d bytes)", sq.size()));
+    check(sq[sq.size()-5] == 8'h87 && sq[sq.size()-4] == 8'h07 && sq[sq.size()-3] == 8'h07 &&
+          sq[sq.size()-2] == 8'h00 && sq[sq.size()-1] == 8'h00, "serial: the last packet is 87 07 07 00 00");
+    for (int i = 0; i < sq.size(); i += 5) check((sq[i] & 8'hF8) == 8'h80, "serial: a header every five bytes");
 
     tb_done("tb_sun_mouse");
   end

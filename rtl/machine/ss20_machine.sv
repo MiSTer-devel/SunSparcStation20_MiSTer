@@ -344,17 +344,18 @@ module ss20_machine #(
   logic irq_kbd, irq_ser;
   logic [7:0] kb_tx, kb_rx, ms_rx;
   logic       kb_tx_v, kb_rx_v, kb_rx_rdy, ms_rx_v, ms_rx_rdy;
+  logic       ms_txd;                // the mouse's line: 1200 baud into channel B's receiver
   logic [3:0] kb_leds;
   logic       kb_bell, kb_click;
   logic [15:0] beep;
   escc #(.CLK_HZ(CLK_HZ)) u_escc_kbd (
     .clk, .rst(rst_m), .bus_i(iob_q[0]), .bus_o(iob_r[0]),
     .txd_a_o(), .rxd_a_i(1'b1), .dcd_a_i(1'b1), .cts_a_i(1'b1), .rts_a_o(), .dtr_a_o(),
-    .txd_b_o(), .rxd_b_i(1'b1), .dcd_b_i(1'b1), .cts_b_i(1'b1), .rts_b_o(), .dtr_b_o(),
+    .txd_b_o(), .rxd_b_i(ms_txd), .dcd_b_i(1'b1), .cts_b_i(1'b1), .rts_b_o(), .dtr_b_o(),
     .tx_byte_a_o(kb_tx), .tx_byte_valid_a_o(kb_tx_v),
     .rx_byte_a_i(kb_rx), .rx_byte_valid_a_i(kb_rx_v && kb_rx_rdy), .rx_byte_ready_a_o(kb_rx_rdy),
     .tx_byte_b_o(), .tx_byte_valid_b_o(),
-    .rx_byte_b_i(ms_rx), .rx_byte_valid_b_i(ms_rx_v && ms_rx_rdy), .rx_byte_ready_b_o(ms_rx_rdy),
+    .rx_byte_b_i(8'd0), .rx_byte_valid_b_i(1'b0), .rx_byte_ready_b_o(ms_rx_rdy),   // (the mouse is on the line)
     .irq_o(irq_kbd));
 
   sun_kbd #(.CLK_HZ(CLK_HZ)) u_kbd (
@@ -365,9 +366,11 @@ module ss20_machine #(
 
   kbd_beep #(.CLK_HZ(CLK_HZ)) u_beep (.clk, .rst(rst_m), .bell_i(kb_bell), .click_i(kb_click), .audio_o(beep));
 
-  sun_mouse #(.CLK_HZ(CLK_HZ)) u_mouse (
+  sun_mouse #(.CLK_HZ(CLK_HZ), .SERIAL(1'b1)) u_mouse (
     .clk, .rst(rst_m), .ps2_mouse_i,
-    .rx_byte_o(ms_rx), .rx_byte_valid_o(ms_rx_v), .rx_byte_ready_i(ms_rx_rdy));
+    .rx_byte_o(ms_rx), .rx_byte_valid_o(ms_rx_v), .rx_byte_ready_i(1'b0), .txd_o(ms_txd));
+  logic unused_ms;
+  assign unused_ms = &{1'b0, ms_rx, ms_rx_v, ms_rx_rdy};
 
   // 1: ttya (A, on the MiSTer's serial line) and ttyb (B, unconnected)
   logic [7:0] ta_tx, ta_rx;
