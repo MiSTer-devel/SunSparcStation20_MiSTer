@@ -756,12 +756,14 @@ module cpu_module
   always_comb begin
     dms = dms_q;
     if (dms_q.ack && bk_sel_q) dms.rdata = {28'd0, bk_q};     // a breakpoint/counter register, read a cycle ago
+    // (the data: the registered answer when there is one, else the
+    // cache's lines whether or not it answers -- nothing reads rdata
+    // without ack, and the cache's hit must not select the data again)
+    if (!dms_q.ack) dms.rdata = dc_lanes;
     if (ds == D_IDLE && dc_fast) begin
       dms.ack = 1'b1;
-      dms.rdata = dc_lanes;
     end else if (ds == D_CACHE && dc_done) begin
       dms.ack = 1'b1;
-      dms.rdata = dc_lanes;
       dms.fault = (dc_err && !d_masked && !(dmr.write && !dmr.atomic)) ? 2'd2 : 2'd0;
     end
   end

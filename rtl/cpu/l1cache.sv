@@ -668,7 +668,16 @@ module l1cache
       for (aw = 0; aw < WAYS; aw++) begin : g_way
         assign da_al[aw] = lanes_al(al_size_i, al_a_i, da_rdata[aw]);
       end
-      assign rdata_al_o = done_q ? lanes_al(al_size_i, al_a_i, rdata_q) : da_al[rd_idx];
+      // the way by its one-hot match (S_LOOKUP's, or the fast hit's in
+      // S_IDLE), not through the index: the encoder was two levels here
+      logic [WAYS-1:0] al_sel;
+      logic [63:0]     al_way;
+      assign al_sel = (st != S_IDLE) ? hit_way : fhit_way;
+      always_comb begin
+        al_way = '0;
+        for (int i = 0; i < WAYS; i++) al_way = al_way | (da_al[i] & {64{al_sel[i]}});
+      end
+      assign rdata_al_o = done_q ? lanes_al(al_size_i, al_a_i, rdata_q) : al_way;
     end
   endgenerate
   // The request's fields are latched whenever one could be taken, whether

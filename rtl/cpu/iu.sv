@@ -424,7 +424,7 @@ module iu
   // and the next request are a short path.
   assign can_issue = ~error & ~flush &
                      (f_have ? (~f_have2 & ~f_pending) : (~f_pending | ifetch_rsp_i.valid)) &
-                     ~ifault_hold & ~(rsp_valid & (ifetch_rsp_i.fault != 2'd0));
+                     ~ifault_hold & ~(ifetch_rsp_i.valid & (ifetch_rsp_i.fault != 2'd0));   // (any faulted answer on the lines: rsp_valid hangs off D's stall)
 
   assign ifetch_req_o.valid = can_issue;
   assign ifetch_req_o.va    = f_pc;
@@ -729,6 +729,14 @@ module iu
       e_npc <= (slot_in_d && redirect) ? redirect_target : d_npc;
       e_pred <= d_pred && !(slot_in_d && redirect);
       e_inf <= d_inf;
+      // the branch or call target, pc + 8 and what E asks of them: made
+      // here from D's registers, so that E's check of a guess and its
+      // redirect start at registers, not behind a 32-bit adder
+      e_pc_disp_q  <= d_pc_disp;
+      e_pc8_q      <= d_pc + 32'd8;
+      e_disp_match <= d_pc_disp[31:2] == d_inf[29:0];
+      e_disp_far   <= d_pc_disp != d_pc + 32'd4;
+      e_ret_q      <= d_inst == 32'h81C7E008 || d_inst == 32'h81C3E008;
       e_annulled <= d_annul_now;
       // the RF output is a cycle old: a write landing at this edge is taken here
       e_rs1 <= (rf_we && rf_rd == d_dec.rs1) ? rf_wdata : rf_q1;
@@ -779,7 +787,7 @@ module iu
     m_is_ld = m_ld;
     if (m_valid && m_dec.wr_rd && !m_trap && (!m_is_ld || m_acked)) begin
       if (m_dec.rd == r) return m_is_ld ? ld_extend(m_dec.size, m_dec.sgn, m_rdata) : m_result;
-      if (m_dec.cls == C_LOAD && m_dec.size == 2'd3 && {m_dec.rd[4:1], 1'b1} == r) return m_rdata[31:0];
+      if (m_ldd && {m_dec.rd[4:1], 1'b1} == r) return m_rdata[31:0];
     end
     if (w_valid && w_dec.wr_rd && !w_trap) begin
       if (w_dec.rd == r) return w_rdval;
@@ -790,14 +798,13 @@ module iu
 
   logic [31:0] w_rdval;        // what W writes to rd (first cycle)
   logic        m_ld;           // M's instruction is a load or ldstub/swap (a register: the forwarding's select)
+  logic        m_ldd;          // ... an ldd
   logic [31:0] w_ldval;        // W's load value, extended
 
   // The immediates, from the instruction word held in E (iu_decode's
   // fields of the same name are not carried into E: 87 flops a CPU)
-  logic [31:0] e_simm13, e_disp22, e_disp30, e_imm22;
+  logic [31:0] e_simm13, e_imm22;
   assign e_simm13 = {{19{e_inst[12]}}, e_inst[12:0]};
-  assign e_disp22 = {{8{e_inst[21]}}, e_inst[21:0], 2'b00};
-  assign e_disp30 = {e_inst[29:0], 2'b00};
   assign e_imm22  = {e_inst[21:0], 10'd0};
 
   logic [31:0] a, b, a_fwd, b_fwd, rs3v, rs4v;
@@ -900,7 +907,10 @@ module iu
   logic [7:0]  e_tag_tt;
   logic        br_cond;
   logic [31:0] e_wrval;        // wr %y/%psr/%wim/%tbr: rs1 xor operand 2
-  logic [31:0] e_pc_disp;      // the branch or call target, or pc + 8: one adder for all
+  logic [31:0] e_pc_disp;      // the branch or call target (a register, made in D)
+  logic [31:0] e_pc_disp_q, e_pc8_q, d_pc_disp;
+  logic        e_disp_match, e_disp_far, e_ret_q;
+  assign d_pc_disp = d_pc + (d_inst[31:30] == 2'b01 ? {d_inst[29:0], 2'b00} : {{8{d_inst[21]}}, d_inst[21:0], 2'b00});
   assign br_cond = cond_true(e_dec.cond, icc_fwd);
   assign e_addr  = a + b;
   // JMPL/RETT: from the registers (nothing in flight writes them, see D)
@@ -910,7 +920,7 @@ module iu
   assign e_wrval = a ^ b;
   // The branch or call target (E checks a guess against it; where a wrong
   // guess of "taken" continues, pc + 8, is e_pc8 below)
-  assign e_pc_disp = e_pc + (e_dec.cls == C_CALL ? e_disp30 : e_disp22);
+  assign e_pc_disp = e_pc_disp_q;
 
   always_comb begin
     e_taken  = 1'b0;
@@ -1044,11 +1054,11 @@ module iu
   // instruction that is no transfer at all to pc + 8, after its slot.
   logic        e_is_ret, e_is_br, e_pred_ok;
   logic [31:0] e_pc8;
-  assign e_is_ret  = e_dec.cls == C_JMPL && (e_inst == 32'h81C7E008 || e_inst == 32'h81C3E008);
+  assign e_is_ret  = e_dec.cls == C_JMPL && e_ret_q;
   assign e_is_br   = e_dec.cls == C_BICC || e_dec.cls == C_FBFCC || e_dec.cls == C_CALL;
-  assign e_pc8     = e_pc + 32'd8;
+  assign e_pc8     = e_pc8_q;
   assign e_pred_ok = e_inf[32] ? (e_is_ret && e_rs1 == {e_inf[29:0], 2'b00})
-                               : (e_is_br && e_taken && e_pc_disp[31:2] == e_inf[29:0]);
+                               : (e_is_br && e_taken && e_disp_match);
   assign redirect        = e_ctl_now && (e_pred ? !e_pred_ok : e_taken);
   assign redirect_target = (e_pred && !e_taken) ? e_pc8 : e_target;
   // The history learns from every conditional branch E resolves
@@ -1072,7 +1082,7 @@ module iu
       bw_back  <= e_inst[21];
       bw_kind  <= e_is_ret ? K_RET : (e_dec.cls == C_CALL || e_dec.cond[2:0] == 3'd0) ? K_JUMP : K_BR;
       bw_tgt   <= e_pc_disp[31:2];
-      if ((e_is_ret || (e_is_br && e_taken && e_pc_disp != e_pc + 32'd4)) && !(e_pred && e_pred_ok)) begin
+      if ((e_is_ret || (e_is_br && e_taken && e_disp_far)) && !(e_pred && e_pred_ok)) begin
         bw_v <= 1'b1;
       end else if (e_pred && !e_is_ret && !e_is_br && !e_annulled) begin
         bw_v <= 1'b1; bw_inval <= 1'b1;
@@ -1118,10 +1128,11 @@ module iu
       m_dec <= '0; m_trap <= 1'b0; m_tt <= '0;          // (the data as in E)
       m_icc <= '0; m_wicc <= 1'b0; m_wy <= 1'b0; m_newcwp <= '0;
       m_wd_late <= 1'b0;
-      m_asi <= '0; m_asi_normal <= 1'b0; m_asi_bypass <= 1'b0; m_ld <= 1'b0;
+      m_asi <= '0; m_asi_normal <= 1'b0; m_asi_bypass <= 1'b0; m_ld <= 1'b0; m_ldd <= 1'b0;
     end else if (e_go) begin
       m_asi        <= e_asi;
       m_ld         <= e_dec.cls == C_LOAD || e_dec.cls == C_ATOMIC;
+      m_ldd        <= e_dec.cls == C_LOAD && e_dec.size == 2'd3;
       m_asi_normal <= e_asi[7:2] == 6'b000010;
       m_asi_bypass <= e_asi[7:4] == 4'h2;
       // the load ahead leaves M at this edge with its data still on the

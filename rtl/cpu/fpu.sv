@@ -613,7 +613,11 @@ module fpu
   assign next_reads_rd = o_rs2[4:1] == c_rd[4:1] || o_rs1[4:1] == c_rd[4:1];
   // (not tiny: S_ROUND is then one cycle; registers only, this goes to the IU's stall)
   assign round_free    = ex == S_ROUND && (res_direct_q || !rnd_tiny) &&
-                         fsr_tem == 5'd0 && state == FP_EXECUTE && !next_reads_rd;
+                         tem0_q && state == FP_EXECUTE && !next_reads_rd;
+  // (no trap enabled, a cycle old: the FSR is only written with the FPU
+  // idle and nothing in flight, never while a result rounds)
+  logic tem0_q;
+  always_ff @(posedge clk) tem0_q <= fsr_tem == 5'd0;
 
   always_ff @(posedge clk) begin
     dp_wr <= 1'b0;
