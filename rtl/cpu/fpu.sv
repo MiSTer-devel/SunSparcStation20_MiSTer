@@ -245,6 +245,12 @@ module fpu
 
   // Datapath results
   fp_wide_t    wide;                   // what goes to the rounder
+  logic        ws_add, ws_mul, ws_ds, ws_itof, ws_ftof;   // its source, one-hot, registered with c_op
+`ifndef SYNTHESIS
+  // synthesis translate_off
+  always_ff @(posedge clk) if (!rst && wide != wide_c) $display("%m: WIDE MISMATCH op %0d", c_op);
+  // synthesis translate_on
+`endif
   logic [63:0] res_bits;               // a direct result (NaN, inf, zero, compare, moves)
   logic [4:0]  res_flags;
   logic        res_direct;             // res_bits is final (no rounding)
@@ -296,19 +302,28 @@ module fpu
   logic [13:0] ediff;
   // F?TOi uses the same shifter: rs2's significand down by 52 - exp
   // (below, with the result in m_small_al[34:3]).
+  // Which operand goes down is decided by the exponents alone; with equal
+  // exponents nothing is shifted, and the 53-bit compare of the
+  // significands only picks the smaller one behind the shifter (it was in
+  // front of it: the longest path of the adder).
   logic        al_b;                   // shift b
+  logic        exp_gt, exp_eq, man_ge, eq_swap;
   always_comb begin
     // (a compare subtracts too: with equal signs a == b is then sum == 0)
     sub_eff1 = (c_op == O_SUB || c_op == O_CMP || c_op == O_CMPE) ^ c_a.sign ^ c_b.sign;
-    a_bigger1 = (c_a.exp > c_b.exp) || (c_a.exp == c_b.exp && c_a.man >= c_b.man);
-    al_b = a_bigger1 || c_op == O_FTOI;
+    exp_gt = c_a.exp > c_b.exp;
+    exp_eq = c_a.exp == c_b.exp;
+    man_ge = c_a.man >= c_b.man;
+    a_bigger1 = exp_gt || (exp_eq && man_ge);
+    al_b = exp_gt || c_op == O_FTOI;
+    eq_swap = exp_eq && man_ge && c_op != O_FTOI;      // equal exponents and b the smaller: b, unshifted
     ma = {2'b0, c_a.man, 3'b0};
     mb = {2'b0, c_b.man, 3'b0};
     e_big1  = a_bigger1 ? c_a.exp : c_b.exp;
     m_big1  = a_bigger1 ? ma : mb;
     m_small = al_b ? mb : ma;
     if (c_op == O_FTOI) ediff = 14'sd52 - c_b.exp;
-    else ediff = 14'(a_bigger1 ? (c_a.exp - c_b.exp) : (c_b.exp - c_a.exp));
+    else ediff = 14'(exp_gt ? (c_a.exp - c_b.exp) : (c_b.exp - c_a.exp));
     al_sticky1 = 1'b0;
     if (ediff > 14'd60) begin
       m_small_al1 = '0;
@@ -323,6 +338,7 @@ module fpu
           m_small_al1 = m_small_al1 >> (1 << k);
         end
     end
+    if (eq_swap) begin m_small_al1 = mb; al_sticky1 = 1'b0; end
   end
 
   logic        sub_eff, a_bigger, al_sticky;
@@ -378,37 +394,51 @@ module fpu
   // zero operands) the rounder's answer is not used (f_bits/f_flags take
   // res_*_q and S_ROUND does not wait for rnd_busy), so those cases need not
   // be in this mux.
+  // The source is picked by one-hot selects registered with c_op (ws_*):
+  // the decode of c_op in front of this 58-bit mux and the normaliser
+  // behind it was the FPU's longest path in most fits.
+  fp_wide_t wide_c;
   always_comb begin
     wide = '0;
+    wide.sign   = (ws_add & wide_c.sign) | (ws_mul & (c_a.sign ^ c_b.sign)) | (ws_ds & ds_r.sign) |
+                  (ws_itof & itof_sign_q) | (ws_ftof & c_b.sign);
+    wide.man    = ({58{ws_add}} & sum[58:1]) | ({58{ws_mul}} & mul_p1[105:48]) | ({58{ws_ds}} & ds_r.man) |
+                  ({58{ws_itof}} & 58'(itof_abs_q)) | ({58{ws_ftof}} & {2'b0, c_b.man, 3'b0});
+    wide.sticky = (ws_add & sum[0]) | (ws_mul & mul_p1_lo) | (ws_ds & ds_r.sticky);
+    wide.exp    = ({14{ws_add}} & e_big) | ({14{ws_mul}} & (c_a.exp + c_b.exp - 14'sd1)) | ({14{ws_ds}} & ds_r.exp) |
+                  ({14{ws_itof}} & 14'sd55) | ({14{ws_ftof}} & c_b.exp);
+  end
+  always_comb begin
+    wide_c = '0;
     case (c_op)
       O_ADD, O_SUB: begin
         // an exact cancellation (sum == 0): +0, -0 in round-to-minus
-        wide.exp    = e_big;
-        wide.sign   = (sum == '0) ? (fsr_rd == RD_MINF) : (a_bigger ? c_a.sign : (c_b.sign ^ (c_op == O_SUB)));
-        wide.man    = sum[58:1];
-        wide.sticky = sum[0];
+        wide_c.exp    = e_big;
+        wide_c.sign   = (sum == '0) ? (fsr_rd == RD_MINF) : (a_bigger ? c_a.sign : (c_b.sign ^ (c_op == O_SUB)));
+        wide_c.man    = sum[58:1];
+        wide_c.sticky = sum[0];
       end
       O_MUL: begin
         // p = man_a * man_b in [2^104, 2^106): value = p * 2^(ea + eb - 104);
         // the top 58 bits, the rest sticky: man * 2^(ea + eb - 56) = man * 2^(exp - 55)
-        wide.sign   = c_a.sign ^ c_b.sign;
-        wide.man    = mul_p1[105:48];
-        wide.sticky = mul_p1_lo;
-        wide.exp    = c_a.exp + c_b.exp - 14'sd1;
+        wide_c.sign   = c_a.sign ^ c_b.sign;
+        wide_c.man    = mul_p1[105:48];
+        wide_c.sticky = mul_p1_lo;
+        wide_c.exp    = c_a.exp + c_b.exp - 14'sd1;
       end
-      O_DIV, O_SQRT: wide = ds_r;
+      O_DIV, O_SQRT: wide_c = ds_r;
       O_ITOF: begin
         // the 32-bit integer in b_bits[63:32]: value = |i| * 2^(55 - 55)
-        wide.sign   = itof_sign_q;
-        wide.man    = 58'(itof_abs_q);
-        wide.exp    = 14'sd55;
-        wide.sticky = 1'b0;
+        wide_c.sign   = itof_sign_q;
+        wide_c.man    = 58'(itof_abs_q);
+        wide_c.exp    = 14'sd55;
+        wide_c.sticky = 1'b0;
       end
       O_FTOF: begin
-        wide.sign   = c_b.sign;
-        wide.man    = {2'b0, c_b.man, 3'b0};    // leading one at 55: value = man * 2^(exp - 55)
-        wide.exp    = c_b.exp;
-        wide.sticky = 1'b0;
+        wide_c.sign   = c_b.sign;
+        wide_c.man    = {2'b0, c_b.man, 3'b0};    // leading one at 55: value = man * 2^(exp - 55)
+        wide_c.exp    = c_b.exp;
+        wide_c.sticky = 1'b0;
       end
       default: ;
     endcase
@@ -627,6 +657,7 @@ module fpu
       state <= FP_EXECUTE;
       fsr_rd <= '0; fsr_tem <= '0; fsr_aexc <= '0; fsr_cexc <= '0; fsr_ftt <= '0; fsr_fcc <= '0;
       qne <= 1'b0;
+      ws_add <= 1'b0; ws_mul <= 1'b0; ws_ds <= 1'b0; ws_itof <= 1'b0; ws_ftof <= 1'b0;
       c_op <= O_UNIMPL; c_src_dbl <= 1'b0; c_dst_dbl <= 1'b0; c_rd <= '0; c_inst <= '0; c_pc <= '0;
       c_a <= '0; c_b <= '0; c_two <= 1'b0;
       wait_cnt <= '0; ds_ok <= 1'b0;
@@ -722,6 +753,11 @@ module fpu
       // An FPop is taken: from S_IDLE, or in S_ROUND's last cycle
       // (round_free; the IU offers one only with op_busy low)
       if (req_i.fpop_valid) begin
+        ws_add  <= op == O_ADD || op == O_SUB;
+        ws_mul  <= op == O_MUL;
+        ws_ds   <= op == O_DIV || op == O_SQRT;
+        ws_itof <= op == O_ITOF;
+        ws_ftof <= op == O_FTOF;
         c_op <= op; c_src_dbl <= src_dbl; c_dst_dbl <= dst_dbl; c_rd <= rd;
         c_inst <= req_i.fpop_inst; c_pc <= req_i.fpop_pc;
         c_b <= u_v;
