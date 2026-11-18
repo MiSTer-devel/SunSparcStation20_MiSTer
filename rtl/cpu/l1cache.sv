@@ -90,6 +90,7 @@ module l1cache
   // size and VA[2:0], held with the request)
   input  logic [1:0]  al_size_i,
   input  logic [2:0]  al_a_i,
+  input  logic        al_sgn_i,      // a byte or halfword is sign-extended to 32 bits
   output logic [63:0] rdata_al_o,
 
   // Line invalidation (the flush ASIs) and the snoop broadcast
@@ -645,14 +646,14 @@ module l1cache
   // The aligned answer: every way's doubleword (and the registered one) is
   // aligned while the tags are compared, and the way select comes last.
   // One shifter behind the select was two more levels on the load path.
-  function automatic logic [63:0] lanes_al(input logic [1:0] size, input logic [2:0] a, input logic [63:0] r);
+  function automatic logic [63:0] lanes_al(input logic [1:0] size, input logic [2:0] a, input logic sgn, input logic [63:0] r);
     /* verilator lint_off UNUSEDSIGNAL */
     logic [63:0] sh;
     /* verilator lint_on UNUSEDSIGNAL */
     sh = r << {a, 3'b000};                     // the addressed byte to the top
     case (size)
-      2'd0: return {56'd0, sh[63:56]};
-      2'd1: return {48'd0, sh[63:48]};
+      2'd0: return {32'd0, {24{sgn & sh[63]}}, sh[63:56]};
+      2'd1: return {32'd0, {16{sgn & sh[63]}}, sh[63:48]};
       2'd2: return {32'd0, sh[63:32]};
       default: return r;
     endcase
@@ -662,11 +663,11 @@ module l1cache
     if (ICACHE) begin : g_noal
       assign rdata_al_o = '0;
       logic unused_al;
-      assign unused_al = &{1'b0, al_size_i, al_a_i};
+      assign unused_al = &{1'b0, al_size_i, al_a_i, al_sgn_i};
     end else begin : g_al
       logic [63:0] da_al [WAYS];
       for (aw = 0; aw < WAYS; aw++) begin : g_way
-        assign da_al[aw] = lanes_al(al_size_i, al_a_i, da_rdata[aw]);
+        assign da_al[aw] = lanes_al(al_size_i, al_a_i, al_sgn_i, da_rdata[aw]);
       end
       // the way by its one-hot match (S_LOOKUP's, or the fast hit's in
       // S_IDLE), not through the index: the encoder was two levels here
@@ -677,7 +678,7 @@ module l1cache
         al_way = '0;
         for (int i = 0; i < WAYS; i++) al_way = al_way | (da_al[i] & {64{al_sel[i]}});
       end
-      assign rdata_al_o = done_q ? lanes_al(al_size_i, al_a_i, rdata_q) : al_way;
+      assign rdata_al_o = done_q ? lanes_al(al_size_i, al_a_i, al_sgn_i, rdata_q) : al_way;
     end
   endgenerate
   // The request's fields are latched whenever one could be taken, whether

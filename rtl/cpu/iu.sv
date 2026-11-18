@@ -81,6 +81,7 @@ module iu
   output logic        dmem_ego_o,     // E moves on at this edge (else M keeps its own address)
   output logic        dmem_normal_o,  // the request's ASI is 0x08-0x0B (a register, like the ASI itself)
   output logic        dmem_bypass_o,  // ... 0x20-0x2F
+  output logic        dmem_sgn_o,     // a byte or halfword load is signed: the answer comes sign-extended
   input  dmem_rsp_t   dmem_rsp_i,
   output fpu_pkg::fpu_req_t fpu_req_o,
   input  fpu_pkg::fpu_rsp_t fpu_rsp_i,
@@ -767,15 +768,6 @@ module iu
     end
   end
 
-  // A load's value, extended per its size (the even register of an ldd)
-  function automatic logic [31:0] ld_extend(input logic [1:0] size, input logic sgn, input logic [63:0] d);
-    case (size)
-      2'd0: return sgn ? {{24{d[7]}}, d[7:0]} : {24'd0, d[7:0]};
-      2'd1: return sgn ? {{16{d[15]}}, d[15:0]} : {16'd0, d[15:0]};
-      2'd3: return d[63:32];
-      default: return d[31:0];
-    endcase
-  endfunction
 
   // Forwarding: the latest value of a register among M (with a load's data
   // once its response is in), W and the value read in D. While an
@@ -786,7 +778,7 @@ module iu
     if (r == 5'd0) return 32'd0;
     m_is_ld = m_ld;
     if (m_valid && m_dec.wr_rd && !m_trap && (!m_is_ld || m_acked)) begin
-      if (m_dec.rd == r) return m_is_ld ? ld_extend(m_dec.size, m_dec.sgn, m_rdata) : m_result;
+      if (m_dec.rd == r) return m_is_ld ? m_val : m_result;
       if (m_ldd && {m_dec.rd[4:1], 1'b1} == r) return m_rdata[31:0];
     end
     if (w_valid && w_dec.wr_rd && !w_trap) begin
@@ -799,6 +791,11 @@ module iu
   logic [31:0] w_rdval;        // what W writes to rd (first cycle)
   logic        m_ld;           // M's instruction is a load or ldstub/swap (a register: the forwarding's select)
   logic        m_ldd;          // ... an ldd
+  logic        m_lsgn;         // ... a signed byte or halfword load
+  logic [31:0] m_val, w_val;   // the load's value for rd (M, once acked); what W writes to rd
+  function automatic logic [31:0] ld_word(input logic dbl, input logic [63:0] d);
+    return dbl ? d[63:32] : d[31:0];
+  endfunction
   logic [31:0] w_ldval;        // W's load value, extended
 
   // The immediates, from the instruction word held in E (iu_decode's
@@ -1128,11 +1125,12 @@ module iu
       m_dec <= '0; m_trap <= 1'b0; m_tt <= '0;          // (the data as in E)
       m_icc <= '0; m_wicc <= 1'b0; m_wy <= 1'b0; m_newcwp <= '0;
       m_wd_late <= 1'b0;
-      m_asi <= '0; m_asi_normal <= 1'b0; m_asi_bypass <= 1'b0; m_ld <= 1'b0; m_ldd <= 1'b0;
+      m_asi <= '0; m_asi_normal <= 1'b0; m_asi_bypass <= 1'b0; m_ld <= 1'b0; m_ldd <= 1'b0; m_lsgn <= 1'b0;
     end else if (e_go) begin
       m_asi        <= e_asi;
       m_ld         <= e_dec.cls == C_LOAD || e_dec.cls == C_ATOMIC;
       m_ldd        <= e_dec.cls == C_LOAD && e_dec.size == 2'd3;
+      m_lsgn       <= e_dec.cls == C_LOAD && e_dec.sgn && e_dec.size[1] == 1'b0;
       m_asi_normal <= e_asi[7:2] == 6'b000010;
       m_asi_bypass <= e_asi[7:4] == 4'h2;
       // the load ahead leaves M at this edge with its data still on the
@@ -1190,12 +1188,14 @@ module iu
   logic m_acked;
   logic [63:0] m_rdata;
   logic [1:0]  m_fault;
+  assign dmem_sgn_o = m_lsgn;
   always_ff @(posedge clk) begin
     if (rst || flush || m_go) begin
       m_acked <= 1'b0;
     end else if (m_done) begin
       m_acked <= 1'b1;
       m_rdata <= dmem_rsp_i.rdata;
+      m_val   <= ld_word(m_ldd, dmem_rsp_i.rdata);
       m_fault <= dmem_rsp_i.fault;
     end
   end
@@ -1238,6 +1238,7 @@ module iu
       w_npc <= m_npc;
       w_result <= m_result;
       w_rdata <= m_acked ? m_rdata : dmem_rsp_i.rdata;
+      w_val   <= !m_ld ? m_result : m_acked ? m_val : ld_word(m_ldd, dmem_rsp_i.rdata);
       w_icc <= m_icc;
       w_wicc <= m_wicc;
       w_y <= m_y;
@@ -1261,8 +1262,12 @@ module iu
   // W: write-back and traps
   // =====================================================================
   // The load value, extended
-  assign w_ldval = ld_extend(w_dec.size, w_dec.sgn, w_rdata);
-  assign w_rdval = (w_dec.cls == C_LOAD || w_dec.cls == C_ATOMIC) ? w_ldval : w_result;
+  // The value W writes to rd is one register, loaded with M's result or
+  // its load value (the memory side hands a byte or halfword already
+  // extended; an ldd's even register is the upper word): the forwarding
+  // from W reads it with no extension or class select in front of the ALU.
+  assign w_ldval = w_val;
+  assign w_rdval = w_val;
 
   logic w_two_cycles;          // ldd, or a trap (l1 then l2)
   assign w_two_cycles = w_valid && ((w_trap && w_tt != TT_RESET) || (!w_trap && w_dec.cls == C_LOAD && w_dec.size == 2'd3));

@@ -38,11 +38,19 @@ module iu_sim
   fpu_pkg::fpu_req_t fpr;
   fpu_pkg::fpu_rsp_t fps;
 
-  iu #(.HAS_FPU(1'b1)) u_iu (.clk, .rst, .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_rsp_i(dms),
+  // the memory side hands a byte or halfword cut out and extended
+  logic      d_sgn;
+  dmem_rsp_t dms_x;
+  always_comb begin
+    dms_x = dms;
+    if (dmr.size == 2'd0)      dms_x.rdata[31:8]  = {24{d_sgn & dms.rdata[7]}};
+    else if (dmr.size == 2'd1) dms_x.rdata[31:16] = {16{d_sgn & dms.rdata[15]}};
+  end
+  iu #(.HAS_FPU(1'b1)) u_iu (.clk, .rst, .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_rsp_i(dms_x),
                              .fpu_req_o(fpr), .fpu_rsp_i(fps),
                              .irl_i(4'd0), .error_o(error), .cwp_o(cwp), .halt_o(halt),
                              /* verilator lint_off PINCONNECTEMPTY */
-                             .dmem_nidx_o(), .dmem_apage_o(), .dmem_bpage_o(), .dmem_bsel_o(), .dmem_ego_o(), .dmem_normal_o(), .dmem_bypass_o(), .dbg_commit_o(), .dbg_trap_o(), .dbg_tt_o(), .dbg_pc_o(), .dbg_psr_o(), .dbg_pipe_o());
+                             .dmem_nidx_o(), .dmem_apage_o(), .dmem_bpage_o(), .dmem_bsel_o(), .dmem_ego_o(), .dmem_normal_o(), .dmem_bypass_o(), .dmem_sgn_o(d_sgn), .dbg_commit_o(), .dbg_trap_o(), .dbg_tt_o(), .dbg_pc_o(), .dbg_psr_o(), .dbg_pipe_o());
                              /* verilator lint_on PINCONNECTEMPTY */
   fpu u_fpu (.clk, .rst, .req_i(fpr), .rsp_o(fps));
 

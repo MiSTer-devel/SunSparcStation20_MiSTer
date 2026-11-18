@@ -75,12 +75,13 @@ module cpu_module
   logic        d_bsel;                 // rs2's is the address's page (rs1 is an offset)
   logic        d_ego;                  // E hands its instruction to M at this edge
   logic        d_asi_normal, d_asi_bypass;   // the request's ASI class, from the IU's registers
+  logic        d_sgn;                  // a signed byte/halfword load: its answer is sign-extended here
   logic [7:0]  dbg_mmu, dbg_ic, dbg_dc;
 
   iu #(.HAS_FPU(HAS_FPU)) u_iu (
     .clk, .rst(iu_rst), .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_nidx_o(d_nidx),
     .dmem_apage_o(d_apage), .dmem_bpage_o(d_bpage), .dmem_bsel_o(d_bsel), .dmem_ego_o(d_ego),
-    .dmem_normal_o(d_asi_normal), .dmem_bypass_o(d_asi_bypass), .dmem_rsp_i(dms),
+    .dmem_normal_o(d_asi_normal), .dmem_bypass_o(d_asi_bypass), .dmem_sgn_o(d_sgn), .dmem_rsp_i(dms),
     .fpu_req_o(fpr), .fpu_rsp_i(fps), .irl_i, .error_o(iu_error), .cwp_o(iu_cwp), .halt_o(iu_halt),
     .dbg_commit_o, .dbg_trap_o, .dbg_tt_o, .dbg_pc_o, .dbg_psr_o, .dbg_pipe_o(dbg_pipe));
 
@@ -176,7 +177,7 @@ module cpu_module
     .clk, .rst, .enable_i(ie), .mid_i,
     .req_i(ic_req), .freq_i(1'b0), .we_i(1'b0), .atomic_i(1'b0), .cacheable_i(ic_cacheable), .pa_i(ic_pa), .idx_i(ic_idx), .be_i(8'hFF), .wdata_i(64'd0),
     .taken_o(ic_taken), .done_o(ic_done), .fast_o(ic_fast), .rdata_o(ic_rdata), .err_o(ic_err), .errq_o(ic_errq), .fpa_i(ic_pa[35:12]),
-    .al_size_i(2'd3), .al_a_i(3'd0), .rdata_al_o(ic_rdata_al),
+    .al_size_i(2'd3), .al_a_i(3'd0), .al_sgn_i(1'b0), .rdata_al_o(ic_rdata_al),
     .inval_i(ic_inval), .inval_line_i(inval_line), .snoop_i(snoop_m), .snoop_hold_o(ic_hold),
     .flash_v_i(ic_flash_v), .flash_l_i(ic_flash_l), .flash_busy_o(ic_flash_busy),
     .diag_req_i(ic_dg_req), .diag_we_i(dmr.write), .diag_tag_i(!dmr.asi[0]), .diag_va_i(dmr.va), .diag_wdata_i(diag_wdata),
@@ -211,7 +212,7 @@ module cpu_module
     .clk, .rst, .enable_i(de), .mid_i,
     .req_i(dc_req), .freq_i(d_hit_now), .we_i(dc_we), .atomic_i(dc_atomic), .cacheable_i(dc_cacheable), .pa_i(dc_pa), .idx_i(dc_idx), .be_i(dc_be), .wdata_i(dc_wdata),
     .taken_o(dc_taken), .done_o(dc_done), .fast_o(dc_fast), .rdata_o(dc_rdata), .err_o(dc_err), .errq_o(dc_errq), .fpa_i(d_fast_pa[35:12]),
-    .al_size_i(dmr.size), .al_a_i(dmr.va[2:0]), .rdata_al_o(dc_rdata_al),
+    .al_size_i(dmr.size), .al_a_i(dmr.va[2:0]), .al_sgn_i(d_sgn), .rdata_al_o(dc_rdata_al),
     .inval_i(dc_inval_any), .inval_line_i(dc_inval_line), .snoop_i(snoop_m), .snoop_hold_o(dc_hold),
     .flash_v_i(dc_flash_v), .flash_l_i(dc_flash_l), .flash_busy_o(dc_flash_busy),
     .diag_req_i(dc_dg_req), .diag_we_i(dmr.write), .diag_tag_i(!dmr.asi[0]), .diag_va_i(dmr.va), .diag_wdata_i(diag_wdata),
@@ -760,6 +761,10 @@ module cpu_module
     // cache's lines whether or not it answers -- nothing reads rdata
     // without ack, and the cache's hit must not select the data again)
     if (!dms_q.ack) dms.rdata = dc_lanes;
+    // a registered answer (a register, a diagnostic read): a byte or
+    // halfword of it is cut out and extended as the cache's is
+    else if (dmr.size == 2'd0) dms.rdata[31:8]  = {24{d_sgn & dms.rdata[7]}};
+    else if (dmr.size == 2'd1) dms.rdata[31:16] = {16{d_sgn & dms.rdata[15]}};
     if (ds == D_IDLE && dc_fast) begin
       dms.ack = 1'b1;
     end else if (ds == D_CACHE && dc_done) begin
