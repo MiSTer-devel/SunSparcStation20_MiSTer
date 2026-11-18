@@ -1332,6 +1332,18 @@ module iu
   assign dbg_psr_o    = psr_word(icc, ef, pil, s, ps, et, cwp);
   assign dbg_pipe_o   = {d_valid, e_valid, m_valid, w_valid, m_is_mem, m_acked, w_stall, error,
                          d_hazard, w_trap, w_second, 1'b0, irl_i};
+  // w_commit for an FP load or store: untrapped, these never take W's
+  // second cycle (that is the ldd's and a trap's), so the term -- a decode
+  // of w_dec.size -- stays off the FPU's start.
+  logic w_fp_commit;
+  assign w_fp_commit = w_valid && !w_fp_hold && !w_trap && !error;
+`ifndef SYNTHESIS
+  // synthesis translate_off
+  always_ff @(posedge clk)
+    if (!rst && (w_dec.cls == C_FPLOAD || w_dec.cls == C_FPSTORE) && w_fp_commit != w_commit)
+      $display("%m: FPCOMMIT MISMATCH pc %h", w_pc);
+  // synthesis translate_on
+`endif
   always_comb begin
     fpu_req_o = '0;
     fpu_req_o.rd_addr    = e_dec.rd;
@@ -1340,13 +1352,13 @@ module iu
     fpu_req_o.fpop_inst  = w_inst;
     fpu_req_o.fpop_pc    = w_pc;
     fpu_req_o.trap_taken = HAS_FPU && w_take_trap && et && w_tt == TT_FP_EXCEPTION;
-    fpu_req_o.wr_valid   = HAS_FPU && w_commit && w_dec.cls == C_FPLOAD && !w_dec.fsr;
+    fpu_req_o.wr_valid   = HAS_FPU && w_fp_commit && w_dec.cls == C_FPLOAD && !w_dec.fsr;
     fpu_req_o.wr_addr    = w_dec.rd;
     fpu_req_o.wr_dbl     = w_dec.size == 2'd3;
     fpu_req_o.wr_data    = w_rdata;
-    fpu_req_o.fsr_wr     = HAS_FPU && w_commit && w_dec.cls == C_FPLOAD && w_dec.fsr;
+    fpu_req_o.fsr_wr     = HAS_FPU && w_fp_commit && w_dec.cls == C_FPLOAD && w_dec.fsr;
     fpu_req_o.fsr_wdata  = w_rdata[31:0];
-    fpu_req_o.fq_pop     = HAS_FPU && w_commit && w_dec.cls == C_FPSTORE && w_dec.fq;
+    fpu_req_o.fq_pop     = HAS_FPU && w_fp_commit && w_dec.cls == C_FPSTORE && w_dec.fq;
   end
 
 `ifndef SYNTHESIS

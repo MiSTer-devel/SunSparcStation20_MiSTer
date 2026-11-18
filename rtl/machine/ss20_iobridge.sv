@@ -134,12 +134,42 @@ module ss20_iobridge
   end
   assign go = beat.req;
 
+  // What the devices see is registered: the beat's fields are loaded when
+  // the state enters B_HI or B_LO (the same cycles as before: the state's
+  // own next-state logic knows the beat), and each device has its own
+  // request flop. No device sits behind the B_HI/B_LO mux and the select
+  // compare any more (the bridge to the ESP's state machine was a
+  // fitter-dependent miss of a nanosecond).
+  iobus_pkg::iob_req_t beat_q;
+  logic [NS-1:0]       req_q;
+  /* verilator lint_off UNUSEDSIGNAL */   // (the request's other fields)
+  function automatic iobus_pkg::iob_req_t beat_of(input mem_pkg::mem_req_t r, input logic low);
+    iobus_pkg::iob_req_t b;
+    b = '0;
+    b.req   = 1'b1;
+    b.we    = r.write;
+    b.addr  = {r.pa[27:3], low, first_byte(low ? r.be[3:0] : r.be[7:4])};
+    b.be    = low ? r.be[3:0] : r.be[7:4];
+    b.wdata = low ? r.wdata[31:0] : r.wdata[63:32];
+    b.pair  = r.be[7:4] != 4'h0 && r.be[3:0] != 4'h0;
+    return b;
+  endfunction
+  /* verilator lint_on UNUSEDSIGNAL */
   always_comb begin
     for (int k = 0; k < NS; k++) begin
-      io_o[k] = beat;
-      io_o[k].req = beat.req && sel == 4'(k);
+      io_o[k] = beat_q;
+      io_o[k].req = req_q[k];
     end
   end
+`ifndef SYNTHESIS
+  // synthesis translate_off
+  always_ff @(posedge clk) if (!rst) begin
+    for (int k = 0; k < NS; k++)
+      if (req_q[k] != (beat.req && sel == 4'(k))) $display("%m: IOB REQ MISMATCH dev %0d", k);
+    if (beat.req && beat_q != beat) $display("%m: IOB BEAT MISMATCH");
+  end
+  // synthesis translate_on
+`endif
 
   // the selected slave's answer, or the decoder's own
   logic        b_ack, b_err;
@@ -180,6 +210,7 @@ module ss20_iobridge
       bs <= B_IDLE;
       hi_data <= '0;
       tcount <= '0;
+      req_q <= '0;
     end else begin
       tcount <= go && !(b_ack || b_err) ? tcount + 8'd1 : 8'd0;
       case (bs)
@@ -187,19 +218,24 @@ module ss20_iobridge
           rq  <= req_i;
           sel <= sel_d;
           bs  <= req_i.be[7:4] != 4'h0 ? B_HI : B_LO;
+          beat_q <= beat_of(req_i, req_i.be[7:4] == 4'h0);
+          for (int k = 0; k < NS; k++) req_q[k] <= sel_d == 4'(k);
         end
         B_HI: begin
           if (b_err && !posted) begin
             rsp_o.ack <= 1'b1; rsp_o.err <= 1'b1;
             bs <= B_GAP;
+            req_q <= '0;
           end else if (b_ack || b_err) begin
             if (lo) begin
               hi_data <= b_rdata;
               bs <= B_LO;
+              beat_q <= beat_of(rq, 1'b1);     // (the request stays up: the low word follows at once)
             end else begin
               rsp_o.ack <= 1'b1;
               rsp_o.rdata <= {b_rdata, 32'd0};
               bs <= B_GAP;
+              req_q <= '0;
             end
           end
         end
@@ -207,10 +243,12 @@ module ss20_iobridge
           if (b_err && !posted) begin
             rsp_o.ack <= 1'b1; rsp_o.err <= 1'b1;
             bs <= B_GAP;
+            req_q <= '0;
           end else if (b_ack || b_err) begin
             rsp_o.ack <= 1'b1;
             rsp_o.rdata <= {hi ? hi_data : 32'd0, b_rdata};
             bs <= B_GAP;
+            req_q <= '0;
           end
         end
         default: bs <= B_IDLE;            // the master drops the finished request

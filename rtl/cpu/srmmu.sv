@@ -486,25 +486,27 @@ module srmmu
   // the state machine below.
   // ---------------------------------------------------------------------
   logic        tv_we, tv_wv, lk_we, lk_wv, used_we, used_hist_clr;
-  logic [5:0]  tv_wi, lk_wi, used_wi;
+  logic [5:0]  tv_wi, lk_wi;
   logic [63:0] victim_oh;
-  assign victim_oh = 64'd1 << victim;
+  // the victim as a one-hot straight from the vector (its lowest set bit;
+  // entry 63 when there is none), not through the priority encoder and a
+  // decoder: the used bits are written from it
+  assign victim_oh = (vsel == '0) ? 64'h8000_0000_0000_0000 : (vsel & (~vsel + 64'd1));
+  logic [63:0] used_oh;                 // the entry a hit or a fill marks
+  assign used_oh = !fill_go ? (64'd1 << h_idx) : w_rep ? (64'd1 << w_rep_idx) : victim_oh;
   // "Every entry used but the victim", for the history clear: from a
   // registered summary of the used bits (none clear, or one and which),
   // compared with the victim, not an AND over the vector behind the
   // victim's decode. The summary is a cycle old; the history is only a
   // replacement policy, so a clear one fill early or late does no harm.
   logic        nu_none_q, nu_one_q;
-  logic [5:0]  nu_idx_q;
+  logic [63:0] nu_q;
   always_ff @(posedge clk) begin
     logic [63:0] nu;
-    logic [5:0]  ni;
     nu = ~used;
-    ni = 6'd0;
-    for (int i = 0; i < 64; i++) if (nu[i]) ni = ni | 6'(i);   // (the index when one bit is set)
     nu_none_q <= nu == '0;
     nu_one_q  <= (nu & (nu - 64'd1)) == '0;
-    nu_idx_q  <= ni;
+    nu_q      <= nu;
   end
   always_comb begin
     tv_we = 1'b0; tv_wi = img_entry; tv_wv = reg_wdata_i[5];
@@ -526,8 +528,7 @@ module srmmu
     // that finds every entry used clears the others' history (Viking
     // §4.11.4), the locked ones' kept
     used_we       = fill_go || (lk_go && h_hit);
-    used_wi       = fill_go ? fill_idx : h_idx;
-    used_hist_clr = fill_go && !w_rep && (nu_none_q || (nu_one_q && nu_idx_q == victim));
+    used_hist_clr = fill_go && !w_rep && (nu_none_q || (nu_one_q && |(nu_q & victim_oh)));
   end
 
   // ---------------------------------------------------------------------
@@ -799,7 +800,7 @@ module srmmu
       if (tv_we) tv[tv_wi] <= tv_wv;
       if (lk_we) tlock[lk_wi] <= lk_wv;
       if (used_hist_clr) used <= (used & tlock) | victim_oh;
-      else if (used_we) used[used_wi] <= 1'b1;
+      else if (used_we) used <= used | used_oh;
 
       // ---- register accesses other than the TLB's ----
       if (reg_go && !tlb_op) begin
