@@ -256,6 +256,14 @@ module iu
   logic [BTW-1:0] bt_raw, bt_hold;
   btb_t        bt;
   logic        bt_fresh;       // bt_raw is the entry of f_pend_pc (the fetch was issued last cycle)
+  // An entry read in the cycle it is written is not used. The RAM has no
+  // read-during-write guarantee (no_rw_check): what comes out then is old
+  // and new bits mixed, differently on every fit and every chip, where the
+  // simulation shows the old entry whole. E verifies a guess's target, but
+  // not that tgt4 is tgt + 4 nor that the fields belong together, so a
+  // mixed entry sent the fetch after the target somewhere else unchecked:
+  // wild jumps on some boards with some fits (2026-11-14 to 2026-11-19).
+  logic        bt_raw_bad, bt_hold_bad, bt_bad;
   logic        bw_v, bw_inval; // E's update, registered
   logic [19:2] bw_pc;
   logic [1:0]  bw_kind;
@@ -291,14 +299,16 @@ module iu
   // synthesis translate_on
   always_ff @(posedge clk) begin
     bt_raw   <= btb[f_pc[11:2]];
+    bt_raw_bad <= bw_v && bw_pc[11:2] == f_pc[11:2];
     bt_fresh <= can_issue;
-    if (bt_fresh) bt_hold <= bt_raw;
+    if (bt_fresh) begin bt_hold <= bt_raw; bt_hold_bad <= bt_raw_bad; end
     if (bw_v) btb[bw_pc[11:2]] <= bw_ent;
   end
   assign bt = bt_fresh ? bt_raw : bt_hold;
+  assign bt_bad = bt_fresh ? bt_raw_bad : bt_hold_bad;
   always_comb begin
     logic hit, is_ret;
-    hit    = bt.v && bt.tag == f_pend_pc[19:12];
+    hit    = bt.v && bt.tag == f_pend_pc[19:12] && !bt_bad;
     is_ret = bt.kind == K_RET;
     // not to pc + 4, and a return only with something on the stack
     ras_ok = ras_cnt != 4'd0 && ras_top != f_pend_pc[31:2] - 30'd1;
