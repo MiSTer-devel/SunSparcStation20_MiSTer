@@ -45,11 +45,15 @@ module iu_regfile
 
   // Physical index: globals 0-7 as they are; r8-r31 in window cwp at
   // 8 + (16*cwp + r - 8) mod 128.
+  // The globals at 128-135; a window's outs and locals at {cwp, r - 8},
+  // its ins at the next window's outs. No adder on the instruction's bits
+  // (the read address comes straight from the fetched word): the window
+  // above is chosen by r[4:3], its number made beside.
   function automatic logic [AW-1:0] phys(input logic [4:0] r, input logic [2:0] cwp);
-    logic [6:0] w;
-    if (r < 5'd8) return AW'(r);
-    w = {cwp, 4'd0} + 7'(r - 5'd8);          // mod 128 by the width
-    return AW'(8) + AW'(w);
+    logic [2:0] win;
+    if (r[4:3] == 2'b00) return {1'b1, 4'd0, r[2:0]};
+    win = (r[4:3] == 2'b11) ? cwp + 3'd1 : cwp;
+    return {1'b0, win, r[4:3] == 2'b10, r[2:0]};
   endfunction
 
   logic [AW-1:0] ra1, ra2, ra3, ra4, wa;

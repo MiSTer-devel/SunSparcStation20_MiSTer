@@ -679,7 +679,7 @@ int main(int argc, char **argv) {
         uint64_t v = (uint64_t)bcd(rtc_tm.tm_sec) | ((uint64_t)bcd(rtc_tm.tm_min) << 8) |
                      ((uint64_t)bcd(rtc_tm.tm_hour) << 16) | ((uint64_t)bcd(rtc_tm.tm_mday) << 24) |
                      ((uint64_t)bcd(rtc_tm.tm_mon + 1) << 32) | ((uint64_t)bcd(rtc_tm.tm_year % 100) << 40) |
-                     ((uint64_t)bcd(rtc_tm.tm_wday + 1) << 48);
+                     ((uint64_t)rtc_tm.tm_wday << 48);          // as Main sends it: 0-6 from Sunday
         t->rtc[0] = (uint32_t)v;
         t->rtc[1] = (uint32_t)(v >> 32);
         t->rtc[2] = 1;

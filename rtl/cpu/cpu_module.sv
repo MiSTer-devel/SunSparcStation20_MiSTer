@@ -71,10 +71,17 @@ module cpu_module
   logic        ic_fast;                // (the I-cache has no fast path)
   logic [15:0] dbg_pipe;
   logic [8:0]  d_nidx;                 // the IU's next M index: the D-cache's RAMs are read a cycle ahead
+  logic [19:0] d_apage, d_bpage;       // ... and the pages E's address registers name (the micro-TLB looks them up ahead)
+  logic        d_bsel;                 // rs2's is the address's page (rs1 is an offset)
+  logic        d_ego;                  // E hands its instruction to M at this edge
+  logic        d_asi_normal, d_asi_bypass;   // the request's ASI class, from the IU's registers
+  logic        d_sgn;                  // a signed byte/halfword load: its answer is sign-extended here
   logic [7:0]  dbg_mmu, dbg_ic, dbg_dc;
 
   iu #(.HAS_FPU(HAS_FPU)) u_iu (
-    .clk, .rst(iu_rst), .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_nidx_o(d_nidx), .dmem_rsp_i(dms),
+    .clk, .rst(iu_rst), .ifetch_req_o(ifr), .ifetch_rsp_i(ifs), .dmem_req_o(dmr), .dmem_nidx_o(d_nidx),
+    .dmem_apage_o(d_apage), .dmem_bpage_o(d_bpage), .dmem_bsel_o(d_bsel), .dmem_ego_o(d_ego),
+    .dmem_normal_o(d_asi_normal), .dmem_bypass_o(d_asi_bypass), .dmem_sgn_o(d_sgn), .dmem_rsp_i(dms),
     .fpu_req_o(fpr), .fpu_rsp_i(fps), .irl_i, .error_o(iu_error), .cwp_o(iu_cwp), .halt_o(iu_halt),
     .dbg_commit_o, .dbg_trap_o, .dbg_tt_o, .dbg_pc_o, .dbg_psr_o, .dbg_pipe_o(dbg_pipe));
 
@@ -169,7 +176,8 @@ module cpu_module
   l1cache #(.ICACHE(1'b1)) u_ic (
     .clk, .rst, .enable_i(ie), .mid_i,
     .req_i(ic_req), .freq_i(1'b0), .we_i(1'b0), .atomic_i(1'b0), .cacheable_i(ic_cacheable), .pa_i(ic_pa), .idx_i(ic_idx), .be_i(8'hFF), .wdata_i(64'd0),
-    .taken_o(ic_taken), .done_o(ic_done), .fast_o(ic_fast), .rdata_o(ic_rdata), .err_o(ic_err),
+    .taken_o(ic_taken), .done_o(ic_done), .fast_o(ic_fast), .rdata_o(ic_rdata), .err_o(ic_err), .errq_o(ic_errq), .fpa_i(ic_pa[35:12]),
+    .al_size_i(2'd3), .al_a_i(3'd0), .al_sgn_i(1'b0), .rdata_al_o(ic_rdata_al),
     .inval_i(ic_inval), .inval_line_i(inval_line), .snoop_i(snoop_m), .snoop_hold_o(ic_hold),
     .flash_v_i(ic_flash_v), .flash_l_i(ic_flash_l), .flash_busy_o(ic_flash_busy),
     .diag_req_i(ic_dg_req), .diag_we_i(dmr.write), .diag_tag_i(!dmr.asi[0]), .diag_va_i(dmr.va), .diag_wdata_i(diag_wdata),
@@ -185,7 +193,11 @@ module cpu_module
   logic [35:0] dc_pa;
   logic [8:0]  dc_idx;
   logic [7:0]  dc_be;
-  logic [63:0] dc_wdata, dc_rdata;
+  logic [63:0] dc_wdata, dc_rdata, dc_rdata_al;
+  logic [63:0] ic_rdata_al;            // (the I-cache aligns nothing)
+  logic        unused_al;
+  logic        ic_errq, dc_errq;
+  assign unused_al = &{1'b0, dc_rdata, ic_rdata_al, dc_errq, ic_err};
 
   // The walker's R/M writes are this module's own, which the D-cache does
   // not take from the snoop broadcast: drop the line they hit explicitly
@@ -199,7 +211,8 @@ module cpu_module
   l1cache #(.ICACHE(1'b0), .FAST_HIT(1'b1)) u_dc (
     .clk, .rst, .enable_i(de), .mid_i,
     .req_i(dc_req), .freq_i(d_hit_now), .we_i(dc_we), .atomic_i(dc_atomic), .cacheable_i(dc_cacheable), .pa_i(dc_pa), .idx_i(dc_idx), .be_i(dc_be), .wdata_i(dc_wdata),
-    .taken_o(dc_taken), .done_o(dc_done), .fast_o(dc_fast), .rdata_o(dc_rdata), .err_o(dc_err),
+    .taken_o(dc_taken), .done_o(dc_done), .fast_o(dc_fast), .rdata_o(dc_rdata), .err_o(dc_err), .errq_o(dc_errq), .fpa_i(d_fast_pa[35:12]),
+    .al_size_i(dmr.size), .al_a_i(dmr.va[2:0]), .al_sgn_i(d_sgn), .rdata_al_o(dc_rdata_al),
     .inval_i(dc_inval_any), .inval_line_i(dc_inval_line), .snoop_i(snoop_m), .snoop_hold_o(dc_hold),
     .flash_v_i(dc_flash_v), .flash_l_i(dc_flash_l), .flash_busy_o(dc_flash_busy),
     .diag_req_i(dc_dg_req), .diag_we_i(dmr.write), .diag_tag_i(!dmr.asi[0]), .diag_va_i(dmr.va), .diag_wdata_i(diag_wdata),
@@ -384,7 +397,7 @@ module cpu_module
     if (is == I_CACHE && ic_done) begin
       ifs_now.valid = 1'b1;
       ifs_now.inst  = ic_pa_q[2] ? ic_rdata[31:0] : ic_rdata[63:32];
-      ifs_now.fault = ic_err ? 2'd2 : 2'd0;
+      ifs_now.fault = ic_errq ? 2'd2 : 2'd0;   // (from the cache's registers: off the hit)
     end
   end
   assign ifs = ifs_hold_v ? ifs_hold : ifs_now;
@@ -474,16 +487,6 @@ module cpu_module
       default: return w;
     endcase
   endfunction
-  function automatic logic [63:0] lanes_rdata(input logic [1:0] size, input logic [2:0] a, input logic [63:0] r);
-    logic [63:0] sh;
-    sh = r << (a * 8);                         // the addressed byte to the top
-    case (size)
-      2'd0: return {56'd0, sh[63:56]};
-      2'd1: return {48'd0, sh[63:48]};
-      2'd2: return {32'd0, sh[63:32]};
-      default: return r;
-    endcase
-  endfunction
   /* verilator lint_on UNUSEDSIGNAL */
 
   typedef enum logic [3:0] {
@@ -554,8 +557,8 @@ module cpu_module
     if (bk_we) bk_m[bk_wa] <= bk_wd;
   end
 
-  assign d_normal   = dmr.asi[7:2] == 6'b000010;              // 0x08-0x0B
-  assign d_bypass   = dmr.asi[7:4] == 4'h2;                   // 0x20-0x2F
+  assign d_normal   = d_asi_normal;                           // 0x08-0x0B
+  assign d_bypass   = d_asi_bypass;                           // 0x20-0x2F
   assign d_flushasi = (dmr.asi[7:3] == 5'b00010 && dmr.asi[2:0] <= 3'd4) ||   // 0x10-0x14
                       (dmr.asi[7:3] == 5'b00011 && dmr.asi[2:0] <= 3'd4);     // 0x18-0x1C
   assign d_at       = {dmr.write | dmr.atomic, ~dmr.asi[1], dmr.asi[0]};
@@ -580,21 +583,59 @@ module cpu_module
   localparam int DUT = 8;
   logic        dut_v [DUT];
   logic [19:0] dut_vtag [DUT];
-  (* ramstyle = "MLAB, no_rw_check" *) logic [23:0] dut_ppn [DUT];   // as ut_ppn
+  logic [23:0] dut_ppn [DUT];          // (registers: read by a one-hot match, three times over)
   logic [2:0]  dut_acc [DUT];
   logic        dut_m [DUT];
   logic [2:0]  dut_wp;
   logic        dut_hit, dut_ok, dut_m_hit;
   logic [35:0] dut_pa;
   logic [2:0]  dut_acc_hit, dut_k;
-  always_comb begin
-    dut_hit = 1'b0; dut_k = '0; dut_acc_hit = '0; dut_m_hit = 1'b0;
-    for (int k = 0; k < DUT; k++) begin
-      if (dut_v[k] && dut_vtag[k] == dmr.va[31:12]) begin
-        dut_hit = 1'b1; dut_k = 3'(k); dut_acc_hit = dut_acc[k]; dut_m_hit = dut_m[k];
+  // The lookup is made a cycle ahead and registered (pre_*): of the page
+  // of E's base register when E hands its instruction to M at this edge
+  // (the address is in that page unless the offset leaves it), else of the
+  // page M's own address is in. In M the registered answer counts when its
+  // page is the address's (pre_exact); if not -- the offset left the page,
+  // or the entries changed under the lookup -- the request waits a cycle,
+  // and the answer is then the one for its own page. So the tag compare of
+  // the cache starts from a registered physical page, and E's adder is not
+  // followed by the lookup.
+  // Three lookups side by side (rs1's page, rs2's, M's own), each a
+  // one-hot match that gates the entries' fields (no index, no RAM read:
+  // this hangs off E's forwarding), and the choice among them last.
+  typedef struct packed { logic hit; logic m; logic [2:0] acc; logic [2:0] k; logic [23:0] ppn; } dut_ans_t;
+  function automatic dut_ans_t dut_look(input logic [19:0] page);
+    dut_ans_t r;
+    r = '0;
+    for (int k = 0; k < DUT; k++)
+      if (dut_v[k] && dut_vtag[k] == page) begin
+        r.hit = 1'b1; r.m = r.m | dut_m[k]; r.acc = r.acc | dut_acc[k]; r.k = r.k | 3'(k); r.ppn = r.ppn | dut_ppn[k];
       end
-    end
-    dut_pa = {dut_ppn[dut_k], dmr.va[11:0]};
+    return r;
+  endfunction
+  dut_ans_t    la, lb, lm, lsel;
+  assign la = dut_look(d_apage);
+  assign lb = dut_look(d_bpage);
+  assign lm = dut_look(dmr.va[31:12]);
+  assign lsel = !d_ego ? lm : d_bsel ? lb : la;
+  logic        pre_known, pre_hit, pre_m, pre_exact;
+  logic [19:0] pre_page;
+  logic [23:0] pre_ppn;
+  logic [2:0]  pre_k, pre_acc;
+  logic        dut_fill_q_w;           // (dut_fill_q, declared below)
+  always_ff @(posedge clk) begin
+    // (a fill or a flush lands at this edge: what was looked up is old)
+    pre_known <= !(rst || tlb_changed || dut_fill_q_w);
+    pre_page  <= !d_ego ? dmr.va[31:12] : d_bsel ? d_bpage : d_apage;
+    pre_hit   <= lsel.hit;
+    pre_k     <= lsel.k;
+    pre_acc   <= lsel.acc;
+    pre_m     <= lsel.m;
+    pre_ppn   <= lsel.ppn;
+  end
+  assign pre_exact = pre_known && pre_page == dmr.va[31:12];
+  always_comb begin
+    dut_hit = pre_exact && pre_hit; dut_k = pre_k; dut_acc_hit = pre_acc; dut_m_hit = pre_m;
+    dut_pa = {pre_ppn, dmr.va[11:0]};
     dut_ok = d_direct || (dut_hit && acc_fault(d_at, dut_acc_hit) == FT_NONE && (!d_at[2] || dut_m_hit));
   end
   logic [35:0] d_fast_pa;
@@ -602,6 +643,7 @@ module cpu_module
 
   // Filled one cycle after the MMU's answer, from a registered copy
   logic        dut_fill, dut_fill_q;
+  assign dut_fill_q_w = dut_fill_q;
   logic [19:0] dut_fill_vtag;
   logic [23:0] dut_fill_ppn;
   logic [2:0]  dut_fill_acc;
@@ -708,17 +750,25 @@ module cpu_module
   // The cache's doubleword is aligned once, by the VA's low bits (a PA's
   // low bits are the VA's, on the fast path and from the register alike:
   // one shifter, not one per path).
+  // (The alignment is made in the cache, on each way beside the tag
+  // compare, so that the way select is the last step into the IU.)
   logic [63:0] dc_lanes;
-  assign dc_lanes = lanes_rdata(dmr.size, dmr.va[2:0], dc_rdata);
+  assign dc_lanes = dc_rdata_al;
   always_comb begin
     dms = dms_q;
     if (dms_q.ack && bk_sel_q) dms.rdata = {28'd0, bk_q};     // a breakpoint/counter register, read a cycle ago
+    // (the data: the registered answer when there is one, else the
+    // cache's lines whether or not it answers -- nothing reads rdata
+    // without ack, and the cache's hit must not select the data again)
+    if (!dms_q.ack) dms.rdata = dc_lanes;
+    // a registered answer (a register, a diagnostic read): a byte or
+    // halfword of it is cut out and extended as the cache's is
+    else if (dmr.size == 2'd0) dms.rdata[31:8]  = {24{d_sgn & dms.rdata[7]}};
+    else if (dmr.size == 2'd1) dms.rdata[31:16] = {16{d_sgn & dms.rdata[15]}};
     if (ds == D_IDLE && dc_fast) begin
       dms.ack = 1'b1;
-      dms.rdata = dc_lanes;
     end else if (ds == D_CACHE && dc_done) begin
       dms.ack = 1'b1;
-      dms.rdata = dc_lanes;
       dms.fault = (dc_err && !d_masked && !(dmr.write && !dmr.atomic)) ? 2'd2 : 2'd0;
     end
   end
@@ -744,9 +794,9 @@ module cpu_module
                 d_pa <= d_fast_pa;
                 d_cacheable <= cacheable_pa(d_fast_pa);
                 if (!dc_fast) ds <= D_CACHE;   // (a read hit with its lines read ahead: answered now)
-              end else begin
+              end else if (d_direct || pre_exact) begin
                 ds <= D_XLAT;                  // the MMU's TLB: misses, faults and walks are found there
-              end
+              end                              // (else: the micro-TLB's answer for this page comes next cycle)
             end else if (d_bypass) begin
               d_pa <= {dmr.asi[3:0], dmr.va};
               d_cacheable <= 1'b0;

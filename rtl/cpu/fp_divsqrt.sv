@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// fp_divsqrt: the significand divide and square root, one result bit per
-// cycle, on the FPU's unpacked operands; exact (a sticky bit says whether
-// the remainder was non-zero).
+// fp_divsqrt: the significand divide and square root, two result bits per
+// cycle (two restoring steps in series: 29 cycles for the 58 bits), on the
+// FPU's unpacked operands; exact (a sticky bit says whether the remainder
+// was non-zero).
 //
 // From: IEEE 754-1985 §5 (correctly rounded division and square root:
 //   enough quotient bits plus a sticky bit give the exact rounding); the
@@ -47,13 +48,22 @@ module fp_divsqrt
   logic [52:0]  den;
   assign den = rad[112:60];
 
-  // One step of either recurrence, on one subtractor: sqrt, two radicand
-  // bits down minus (4q + 1); divide, 2 rem - 2b (rem doubled, above)
-  logic [61:0] t_x, trial;
+  // One step of either recurrence: sqrt, two radicand bits down minus
+  // (4q + 1); divide, 2 rem - 2b (rem doubled, above). Two steps a cycle,
+  // the second on the first one's remainder and quotient.
+  /* verilator lint_off UNUSEDSIGNAL */   // r1[61] (the second step shifts it out)
+  logic [61:0] t1, s1, r1, t2, s2, r2;
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [57:0] q1, q2;
   always_comb begin
-    if (is_sqrt) t_x = {rem[59:0], rad[115:114]};
-    else         t_x = {rem[60:0], 1'b0};
-    trial = t_x - (is_sqrt ? {2'b00, q, 2'b01} : {8'd0, den, 1'b0});
+    t1 = is_sqrt ? {rem[59:0], rad[115:114]} : {rem[60:0], 1'b0};
+    s1 = t1 - (is_sqrt ? {2'b00, q, 2'b01} : {8'd0, den, 1'b0});
+    r1 = s1[61] ? t1 : s1;
+    q1 = {q[56:0], ~s1[61]};
+    t2 = is_sqrt ? {r1[59:0], rad[113:112]} : {r1[60:0], 1'b0};
+    s2 = t2 - (is_sqrt ? {2'b00, q1, 2'b01} : {8'd0, den, 1'b0});
+    r2 = s2[61] ? t2 : s2;
+    q2 = {q1[56:0], ~s2[61]};
   end
 
   always_ff @(posedge clk) begin
@@ -65,7 +75,7 @@ module fp_divsqrt
       run <= 1'b1;
       is_sqrt <= sqrt_i;
       if (sqrt_i) begin
-        cnt <= 6'd58;
+        cnt <= 6'd29;
         q <= '0;
         rem <= '0;
         sign <= 1'b0;
@@ -79,7 +89,7 @@ module fp_divsqrt
           exp <= (b_i.exp >>> 1) - 14'sd1;
         end
       end else begin
-        cnt <= 6'd58;
+        cnt <= 6'd29;
         sign <= a_i.sign ^ b_i.sign;
         rad <= 116'(b_i.man) << 60;    // den
         rem <= 62'(a_i.man);
@@ -93,9 +103,9 @@ module fp_divsqrt
         done_o <= 1'b1;
       end else begin
         cnt <= cnt - 6'd1;
-        if (is_sqrt) rad <= rad << 2;
-        if (!trial[61]) begin rem <= trial; q <= {q[56:0], 1'b1}; end
-        else            begin rem <= t_x;   q <= {q[56:0], 1'b0}; end
+        if (is_sqrt) rad <= rad << 4;
+        rem <= r2;
+        q <= q2;
       end
     end
   end

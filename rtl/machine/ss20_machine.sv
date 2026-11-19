@@ -344,17 +344,18 @@ module ss20_machine #(
   logic irq_kbd, irq_ser;
   logic [7:0] kb_tx, kb_rx, ms_rx;
   logic       kb_tx_v, kb_rx_v, kb_rx_rdy, ms_rx_v, ms_rx_rdy;
+  logic       ms_txd;                // the mouse's line: 1200 baud into channel B's receiver
   logic [3:0] kb_leds;
   logic       kb_bell, kb_click;
   logic [15:0] beep;
   escc #(.CLK_HZ(CLK_HZ)) u_escc_kbd (
     .clk, .rst(rst_m), .bus_i(iob_q[0]), .bus_o(iob_r[0]),
     .txd_a_o(), .rxd_a_i(1'b1), .dcd_a_i(1'b1), .cts_a_i(1'b1), .rts_a_o(), .dtr_a_o(),
-    .txd_b_o(), .rxd_b_i(1'b1), .dcd_b_i(1'b1), .cts_b_i(1'b1), .rts_b_o(), .dtr_b_o(),
+    .txd_b_o(), .rxd_b_i(ms_txd), .dcd_b_i(1'b1), .cts_b_i(1'b1), .rts_b_o(), .dtr_b_o(),
     .tx_byte_a_o(kb_tx), .tx_byte_valid_a_o(kb_tx_v),
     .rx_byte_a_i(kb_rx), .rx_byte_valid_a_i(kb_rx_v && kb_rx_rdy), .rx_byte_ready_a_o(kb_rx_rdy),
     .tx_byte_b_o(), .tx_byte_valid_b_o(),
-    .rx_byte_b_i(ms_rx), .rx_byte_valid_b_i(ms_rx_v && ms_rx_rdy), .rx_byte_ready_b_o(ms_rx_rdy),
+    .rx_byte_b_i(8'd0), .rx_byte_valid_b_i(1'b0), .rx_byte_ready_b_o(ms_rx_rdy),   // (the mouse is on the line)
     .irq_o(irq_kbd));
 
   sun_kbd #(.CLK_HZ(CLK_HZ)) u_kbd (
@@ -365,9 +366,11 @@ module ss20_machine #(
 
   kbd_beep #(.CLK_HZ(CLK_HZ)) u_beep (.clk, .rst(rst_m), .bell_i(kb_bell), .click_i(kb_click), .audio_o(beep));
 
-  sun_mouse #(.CLK_HZ(CLK_HZ)) u_mouse (
+  sun_mouse #(.CLK_HZ(CLK_HZ), .SERIAL(1'b1)) u_mouse (
     .clk, .rst(rst_m), .ps2_mouse_i,
-    .rx_byte_o(ms_rx), .rx_byte_valid_o(ms_rx_v), .rx_byte_ready_i(ms_rx_rdy));
+    .rx_byte_o(ms_rx), .rx_byte_valid_o(ms_rx_v), .rx_byte_ready_i(1'b0), .txd_o(ms_txd));
+  logic unused_ms;
+  assign unused_ms = &{1'b0, ms_rx, ms_rx_v, ms_rx_rdy};
 
   // 1: ttya (A, on the MiSTer's serial line) and ttyb (B, unconnected)
   logic [7:0] ta_tx, ta_rx;
@@ -415,14 +418,42 @@ module ss20_machine #(
   assign uart_rts_o = 1'b0;
   assign uart_dtr_o = 1'b0;
 
-  // 2: the M48T08, its clock seeded from the MiSTer's RTC (BCD) at the
-  // first update, its 8 KB kept in the image on SD slot 3 by nvram_sd
-  // (which also stamps the ID PROM from ioctl index 64's serial)
-  logic rtc_t, rtc_seen;
+  // 2: the M48T08, its clock seeded from the MiSTer's RTC (BCD), its 8 KB
+  // kept in the image on SD slot 3 by nvram_sd (which also stamps the ID
+  // PROM from ioctl index 64's serial).
+  // The seed is taken once, at Main's first update (it sends the time as
+  // it starts the core, usually while the machine is still in reset: the
+  // update is remembered and the chip is loaded as the reset ends). Not
+  // again at a later reset: the chip has kept counting, and hps_io's copy is
+  // as old as the core's start. Waiting for a second update, as this did,
+  // left the clock unset: Main sends one, and the PROM and the OS read the
+  // chip in the first seconds ("Time-of-day chip had incorrect date", and
+  // the date then came from the file system).
+  /*verilator lint_off PROCASSINIT*/     // (not reset: the seed is taken once a configuration)
+  logic rtc_t = 1'b0, rtc_pend = 1'b0, rtc_seeded = 1'b0;
+  /*verilator lint_on PROCASSINIT*/
+  logic rtc_seed;
+  assign rtc_seed = !rst_m && rtc_pend;       // (the chip's own reset: the NVRAM image loads first)
   always_ff @(posedge clk) begin
     rtc_t <= rtc_i[64];
-    if (rst) rtc_seen <= 1'b0;
-    else if (rtc_t != rtc_i[64]) rtc_seen <= 1'b1;
+    if (rtc_t != rtc_i[64] && !rtc_seeded) begin rtc_pend <= 1'b1; rtc_seeded <= 1'b1; end
+    if (rtc_seed) rtc_pend <= 1'b0;
+  end
+
+  // Main's time in the chip's terms. The year: Main sends the last two
+  // digits; a Sun's TOD counts years from 1968 (OBP, SunOS and NetBSD all
+  // add 1968 to the year byte; QEMU's m48t59 on sun4m: base_year 1968), so
+  // 2026 is 58, not 26 (26 read as 1994: "Last shutdown is later than time
+  // on time-of-day chip"). Main's years are 2000-2099, so the byte is the
+  // two digits + 32, modulo 100, in BCD. The day of the week: Main sends
+  // 0-6 from Sunday, the chip holds 1-7.
+  logic [7:0] rtc_year, rtc_dow;
+  always_comb begin
+    logic [7:0] y;
+    y = 8'(rtc_i[47:44] * 4'd10) + 8'(rtc_i[43:40]) + 8'd32;
+    if (y >= 8'd100) y = y - 8'd100;
+    rtc_year = {4'(y / 8'd10), 4'(y % 8'd10)};
+    rtc_dow  = {5'd0, rtc_i[50:48]} + 8'd1;
   end
 
   logic [23:0] seed;
@@ -458,9 +489,9 @@ module ss20_machine #(
   m48t08 #(.CLK_HZ(CLK_HZ)) u_nvram (
     .clk, .rst(rst_m), .bus_i(iob_q[2]), .bus_o(iob_r[2]),
     .img_we(nv_we), .img_addr(nv_addr), .img_be(nv_be), .img_wdata(nv_wdata), .img_rdata(nv_rdata),
-    .seed_valid(rtc_seen && rtc_t != rtc_i[64]),
-    .seed_sec(rtc_i[7:0]), .seed_min(rtc_i[15:8]), .seed_hour(rtc_i[23:16]), .seed_day(rtc_i[55:48]),
-    .seed_date(rtc_i[31:24]), .seed_month(rtc_i[39:32]), .seed_year(rtc_i[47:40]));
+    .seed_valid(rtc_seed),
+    .seed_sec(rtc_i[7:0]), .seed_min(rtc_i[15:8]), .seed_hour(rtc_i[23:16]), .seed_day(rtc_dow),
+    .seed_date(rtc_i[31:24]), .seed_month(rtc_i[39:32]), .seed_year(rtc_year));
 
   // 3: the counter/timers, 4: the interrupt controller
   logic irq_tsys;

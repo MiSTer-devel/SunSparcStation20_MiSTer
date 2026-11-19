@@ -9,10 +9,17 @@
 //   its fourth ack (or an err), a locked read until the owner's next write
 //   completes (ldstub/swap and the table walker's R-bit update stay atomic
 //   against the other masters).
-// - The grant is combinational when the port is free, so an uncontended
-//   request costs no cycle; after each finished request one cycle passes
-//   with nothing presented (the finished master drops its request then,
-//   and ss20_memctl ignores that cycle anyway).
+// - The grant is combinational when the port is free; after each finished
+//   request one cycle passes with nothing presented (the finished master
+//   drops its request then, and ss20_memctl ignores that cycle anyway).
+// - The request goes to ss20_memctl through a register (req_o, mid_o): a
+//   cycle more a request, and the path from a cache's state through the
+//   module's port owner and this arbiter no longer runs on into the
+//   controller and the EMC's entry match (the design's longest at 65 MHz).
+//   An ack clears the registered valid, so the controller, idle again in
+//   the next cycle, does not see the answered request a second time (the
+//   next beat of a line write, or the write after a locked read, arrives
+//   the cycle after).
 // - Round robin among the masters that ask, starting after the last one
 //   served. A CPU whose bit in park_i is set (the MSI's arbiter-enable
 //   register clear for it, t_msi) is not granted.
@@ -86,14 +93,21 @@ module ss20_mbus
   /* verilator lint_on UNUSEDSIGNAL */
   assign m_req = sel_req(cur);
   assign o_req = sel_req(own);            // (an ack only ever comes to the registered owner)
+  mem_req_t   req_c;
+  logic [3:0] mid_c;
   always_comb begin
-    req_o = m_req;
+    req_c = m_req;
     if (m_req.burst && m_req.write) begin     // a line write: four single beats
-      req_o.burst = 1'b0;
-      req_o.pa    = {m_req.pa[35:5], beat, 3'b000};
+      req_c.burst = 1'b0;
+      req_c.pa    = {m_req.pa[35:5], beat, 3'b000};
     end
   end
-  assign mid_o = (cur < MW'(NCPU)) ? 4'(8 + int'(cur)) : 4'd0;
+  assign mid_c = (cur < MW'(NCPU)) ? 4'(8 + int'(cur)) : 4'd0;
+  always_ff @(posedge clk) begin
+    req_o <= req_c;
+    mid_o <= mid_c;
+    if (rst || rsp_i.ack) req_o.valid <= 1'b0;
+  end
 
   // the answer goes to the owner; the data goes to everyone (a master reads
   // it only with its ack), which saves gating 64 bits per master
