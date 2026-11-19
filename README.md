@@ -15,7 +15,7 @@ mouse, and CS4231 audio. Licensed GPL-2.0-or-later.
 
 ## Features
 
-- Two SuperSPARC (TMS390Z50) CPU modules at 65 MHz, SMP: integer unit,
+- Two SuperSPARC (TMS390Z50) CPU modules at 60 MHz, SMP: integer unit,
   IEEE single/double FPU, SRMMU, 20 KB I-cache and 16 KB D-cache with
   bus snooping.
 - 64, 128, 256 or 464 MB of memory.
@@ -48,11 +48,10 @@ mouse, and CS4231 audio. Licensed GPL-2.0-or-later.
 ## Limitations
 
 - At most 464 MB of memory.
-- CPUs at 65 MHz with no external cache (no SuperCache/MXCC). The 65 MHz
-  build misses the timing analysis of the CPU clock by about 0.5 ns (it is
-  tested on boards, not guaranteed over temperature);
+- CPUs at 60 MHz (the SS20-61's clock) with no external cache (no
+  SuperCache/MXCC). The build meets the timing analysis on every clock.
   `SunSparcStation20_55mhz_20261114.rbf` in `releases/` is an earlier
-  build at 55 MHz, which meets it (without the clock fix of 2026-11-15).
+  build at 55 MHz (without the clock fix of 2026-11-15).
 - One frame buffer: the TCX, 8-bit only (no 24-bit TCX, cgsix or SX).
 - No floppy drive, no parallel port device, no ISDN (DBRI) audio.
 - Sun's OBP is not included: the default boot rom is openbios, or supply your own SS20 PROM image.
@@ -75,7 +74,7 @@ What is next: [docs/VERILOG-PLAN.md](docs/VERILOG-PLAN.md).
 
 ## Install
 
-1. Copy the rbf from `releases/` (`SunSparcStation20_65mhz_20261115.rbf`) to
+1. Copy the rbf from `releases/` (`SunSparcStation20_60mhz_20261119.rbf`) to
    the SD card's `_Unstable/` (or `_Computer/`).
 2. Copy `releases/boot.rom` (OpenBIOS) to
    `games/SunSparcStation/boot.rom`, or use Sun's own PROM there instead.
